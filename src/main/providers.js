@@ -293,6 +293,8 @@ async function streamChat(m, messages, opts) {
       throw netErr(e);
     }
     if (!res.ok && tryUsage && (res.status === 400 || res.status === 422)) {
+      // 丢弃被拒响应前必须先清空/取消响应体：未读的 body 会让 undici 连接滞留在池里
+      try { await res.text(); } catch (e) { try { Promise.resolve(res.body.cancel()).catch(function () {}); } catch (e2) { /* 已断 */ } }
       try { res = await doFetch(false); } catch (e) { throw netErr(e); }
     }
     bumpIdle();

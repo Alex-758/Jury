@@ -220,12 +220,9 @@
       if (!pending.size && !searchPhase) { streaming = null; refreshSendBtn(); }
       if (ctx.reviewCtx) { onReviewAllDone(ctx); return; }
       if (ctx.mergeMsg) {
-        // 综合请求结束：同步到当前版本的快照
-        const am = ctx.am;
-        if (am && Array.isArray(am.versions) && am.versions.length) {
-          am.versions[am.active >= 0 ? am.active : am.versions.length - 1].merge =
-            am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
-        }
+        // 综合请求结束：同步到当前版本的快照。必须走 syncMergeToVersion（带 deco 剥离），
+        // 不能在这里内联拷贝——版本快照不带装饰缓存是同一不变量，两份实现迟早改漏一处
+        syncMergeToVersion(ctx.am);
         finalizeMergeCard(ctx, !!ctx.mergeFailed);
         MM.save();
         return;

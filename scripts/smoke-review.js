@@ -211,6 +211,57 @@ server.listen(0, '127.0.0.1', () => {
       // 开关回显：设置状态与胶囊高亮
       const tgl = await js("({on: document.querySelector('#tgl-review').checked, cls: document.querySelector('#tgl-review-wrap').classList.contains('on')})");
       check('场景 D：开关状态与胶囊高亮一致', tgl.on === true && tgl.cls === true, JSON.stringify(tgl));
+
+      // ===== 场景 E：审查版本化上限（③）——连做 6 次审查 → 只保留最近 5 份，被裁剪份的
+      // 用量折进 prunedTokens，会话累计 token 不缩水；卡片头部出现「审查 x/5」切换 =====
+      await js("document.querySelector('#tgl-review-wrap').click()"); // 关自动，改走手动
+      await sleep(150);
+      const curRound = await js("(function(){ var s=MM.state.sessions.find(function(x){return x.id===MM.state.currentId;}); var am=s.messages[s.messages.length-1]; return am && am.role==='assistant' ? am.roundId : ''; })()");
+      if (!curRound) throw new Error('场景 E：找不到当前轮次');
+      const tokensBefore = await js("(function(){ var s=MM.state.sessions.find(function(x){return x.id===MM.state.currentId;}); return MM.sessions._sessionTokensForTest ? MM.sessions._sessionTokensForTest(s) : -1; })()");
+      const redoBtn = "(function(){var b=[].filter.call(document.querySelectorAll('.round-tools .tool-btn'),function(x){return x.textContent.indexOf('重新审查')>=0;});if(b.length){b[b.length-1].click();return true;}return false;})()";
+      const countExpr = "(function(){ var s=MM.state.sessions.find(function(x){return x.id===MM.state.currentId;}); var am=s.messages[s.messages.length-1]; return (am.reviews||[]).length; })()";
+      let redoOk = true;
+      for (let i = 1; i <= 5; i++) {
+        const target = i + 1; // 场景 D 已有 1 份
+        // 等 streaming 结束（上一份审查收尾），再点一次；确认框出现后点「重新审查」
+        const idle = await poll("!document.querySelector('#btn-send').classList.contains('stop')", 15000);
+        if (!idle) { redoOk = false; break; }
+        await js(redoBtn);
+        await sleep(150);
+        await js("(function(){ var ov=document.getElementById('confirm-overlay'); var ok=ov&&ov.querySelector('.cf-ok'); if(ok&&!ov.classList.contains('hidden')) ok.click(); })()");
+        // 以 reviews.length 递增为准（卡片上的「完成」可能是上一份的残留文案，不可作判据）。
+        // 第 5 次（总数第 6 份）触发上限裁剪：计数恒 5，改以「裁剪发生：prunedTokens>0」为判据
+        const crit = i < 5 ? (countExpr + " === " + target)
+          : "(function(){ var s=MM.state.sessions.find(function(x){return x.id===MM.state.currentId;}); var am=s.messages[s.messages.length-1]; return (am.prunedTokens||0) > 0 && (am.reviews||[]).length === 5; })()";
+        const grown = await poll(crit, 20000);
+        if (!grown) { redoOk = false; break; }
+      }
+      check('场景 E：连续 5 次重新审查全部完成（含一次上限裁剪）', redoOk, '');
+      const capState = await js(`(function(){
+        var s = MM.state.sessions.find(function(x){ return x.id === MM.state.currentId; });
+        var am = s.messages[s.messages.length - 1];
+        return JSON.stringify({ n: (am.reviews || []).length, active: am.reviewActive,
+          pruned: am.prunedTokens || 0, reviewGone: !('review' in am),
+          tokens: MM.sessions._sessionTokensForTest ? MM.sessions._sessionTokensForTest(s) : -1 });
+      })()`);
+      const cs = JSON.parse(capState);
+      check('场景 E：审查历史封顶 5 份（旧份自动让位）', cs.n === 5 && cs.active === 4, capState);
+      check('场景 E：旧单份字段已迁移（无残留 am.review）', cs.reviewGone === true, capState);
+      check('场景 E：被裁剪审查的用量折进 prunedTokens（统计不断账）',
+        cs.pruned > 0 && cs.tokens >= tokensBefore, capState + ' before=' + tokensBefore);
+      // 卡片头部的历史切换器：‹ › 可切显示份数（按 data-round 定位场景 E 这轮的卡）
+      const navOf = "(function(){var cs=document.querySelectorAll('.review-card');for(var i=cs.length-1;i>=0;i--){if(cs[i].getAttribute('data-round')==='" + curRound + "'){var l=cs[i].querySelector('.ver-label');return l?l.textContent:'';}}return '';})()";
+      const nav1 = await js(navOf);
+      check('场景 E：审查卡显示「审查 5/5」', nav1.indexOf('5/5') >= 0, 'label=' + nav1);
+      // 切换有 streaming 守卫：第 6 份创建即裁剪（pruned 立即可判），生成收尾可能未结束，
+      // 先等空闲再点，否则切换被「请等待当前任务完成」拦掉
+      await poll("!document.querySelector('#btn-send').classList.contains('stop')", 15000);
+      await sleep(300);
+      await js("(function(){var cs=document.querySelectorAll('.review-card');for(var i=cs.length-1;i>=0;i--){if(cs[i].getAttribute('data-round')==='" + curRound + "'){var b=cs[i].querySelectorAll('.ac-head .tool-btn')[0];if(b)b.click();}break;}})()");
+      await sleep(250);
+      const nav2 = await js(navOf);
+      check('场景 E：点 ‹ 切到上一份审查（审查 4/5）', nav2.indexOf('4/5') >= 0, 'label=' + nav2);
     }
 
     run().then(() => {
