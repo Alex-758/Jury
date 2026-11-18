@@ -65,14 +65,14 @@
 npm install        # 安装依赖（已配置 npmmirror 镜像加速）
 npm start          # 开发模式运行
 npm test           # 快门测试：零拉起窗口（全部 JS 语法门 + CSS 变量闭合门 + Node 套件）
-npm run test:full  # 全量测试：19 套件（含拉起应用的端到端 / 性能 / 猴子测试）
+npm run test:full  # 全量测试：21 套件（含拉起应用的端到端 / 性能 / 猴子测试）
 node scripts/test.js --only smoke-review,e2e-app   # 定向拉起指定套件（改动面 → 套件映射见 --list）
 node scripts/test.js --list                        # 列出全部套件与覆盖面
 npm run icon       # 生成应用图标
 npm run dist       # 打包 Windows 安装版 + 便携版 exe（先自动预置 markitdown 转换器）
 ```
 
-测试体系按「改动面 → 套件」分层（19 套件）：纯逻辑与静态检查零拉起秒级完成，共享面改动用 `--only` 定向拉起，发布前 `--full` 全量回归。
+测试体系按「改动面 → 套件」分层（21 套件）：纯逻辑与静态检查零拉起秒级完成，共享面改动用 `--only` 定向拉起，发布前 `--full` 全量回归。
 
 ## 目录结构
 
