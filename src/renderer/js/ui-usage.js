@@ -110,11 +110,12 @@ window.MM = window.MM || {};
           for (const r of (m.results || [])) if (r) pushRow(rows, baseTs, 'chat', title, r);
           if (m.merge) pushMergeRow(rows, m.merge.createdAt || baseTs, title, m.merge);
         }
-        if (m.review) {
-          const rts = m.review.createdAt || baseTs;
-          for (const it of (m.review.items || [])) if (it) pushRow(rows, rts, 'review', title, it);
+        // 审查已版本化（③）：逐份入账（各自 createdAt 计时间桶），旧审查用量不再消失
+        for (const rv of (m.reviews || [])) {
+          const rts = rv.createdAt || baseTs;
+          for (const it of (rv.items || [])) if (it) pushRow(rows, rts, 'review', title, it);
           // 仲裁请求也是真实请求；失败仲裁没有 usage 也没有 stopped，归为进行中（数据层无该状态）
-          if (m.review.verdict) pushRow(rows, rts, 'review', title, m.review.verdict, '仲裁');
+          if (rv.verdict) pushRow(rows, rts, 'review', title, rv.verdict, '仲裁');
         }
         if (m.prunedTokens) pruned += Number(m.prunedTokens) || 0; // 版本池裁剪折算：只进总量，无法按天/模型拆
       }

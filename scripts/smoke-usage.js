@@ -326,9 +326,9 @@ server.listen(0, '127.0.0.1', () => {
           { role: 'assistant', createdAt: Date.now(), versions: [{ results: [
               { modelId: 'p1::m1', name: '模型一', status: 'done', usage: null }
             ], merge: { content: '报告正文', mode: 'model', createdAt: Date.now() }, at: Date.now() }], active: 0,
-            review: { createdAt: Date.now(), items: [
+            reviews: [{ createdAt: Date.now(), items: [
               { modelId: 'p1::m2', name: '模型二', status: 'done', usage: null, content: '审查意见' }
-            ], verdict: { content: '最终结论', stopped: false } } }
+            ], verdict: { content: '最终结论', stopped: false } }] }
         ] }];
         try {
           const agg = MM.usage.testHooks.aggregate();

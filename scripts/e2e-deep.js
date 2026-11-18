@@ -527,11 +527,12 @@ server.listen(0, '127.0.0.1', () => {
       assert(await waitFor("(function(){ var c=document.querySelector('.review-card'); return c && /完成/.test(c.querySelector('.ac-head .ac-status').textContent); })()", 20000), '审查未完成');
       const t = await js(`(function(){
         var am = MM.sessions.current().messages.filter(function(m){return m.role==='assistant';}).pop();
-        if (!am.review) return JSON.stringify({ none: true });
-        return JSON.stringify({ items: am.review.items.length,
-          done: am.review.items.filter(function(i){return i.status==='done';}).length,
-          verdict: !!(am.review.verdict && am.review.verdict.content),
-          usage: am.review.items.every(function(i){return i.usage;}) && !!(am.review.verdict && am.review.verdict.usage) });
+        if (!am.reviews || !am.reviews.length) return JSON.stringify({ none: true });
+        var rv = am.reviews[am.reviews.length - 1];
+        return JSON.stringify({ items: rv.items.length,
+          done: rv.items.filter(function(i){return i.status==='done';}).length,
+          verdict: !!(rv.verdict && rv.verdict.content),
+          usage: rv.items.every(function(i){return i.usage;}) && !!(rv.verdict && rv.verdict.usage) });
       })()`);
       const o = JSON.parse(t);
       assert(!o.none && o.items === 2 && o.done === 2, '审查条目=' + t);
@@ -568,7 +569,7 @@ server.listen(0, '127.0.0.1', () => {
       await sleep(600); // all-done 钩子触发窗口
       const t = await js(`(function(){
         var am = MM.sessions.current().messages.filter(function(m){return m.role==='assistant';}).pop();
-        return JSON.stringify({ review: !!am.review, merged: !!(am.merge && am.merge.content) });
+        return JSON.stringify({ review: !!(am.reviews && am.reviews.length), merged: !!(am.merge && am.merge.content) });
       })()`);
       const o = JSON.parse(t);
       assert(!o.review, '单份回答不应触发审查');

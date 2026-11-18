@@ -991,11 +991,11 @@ window.MM = window.MM || {};
       title: hasMerge ? '用当前设置重新生成综合回答（覆盖现有这份，旧综合保留在版本历史中）' : '把多个模型的回答合并为一份综合回答',
       onclick: function () { doMerge(am.roundId, { redo: hasMerge }); }
     }, hasMerge ? '重新综合' : '综合回答'));
-    // 交叉审查入口常驻：已有审查时变成「重新审查」（覆盖旧审查，不做版本历史）
-    const hasReview = reviewHasContent(am.review);
+    // 交叉审查入口常驻：已有审查时变成「重新审查」（新增一份记录，历史保留）
+    const hasReview = hasAnyReview(am);
     tools.appendChild(U.el('button', {
       class: 'tool-btn',
-      title: hasReview ? '用当前设置重新进行交叉审查（覆盖现有这份）' : '各模型互相审查本轮回答，仲裁给出最终结论',
+      title: hasReview ? '用当前设置再进行一次交叉审查（新增一份记录，最多保留 5 份）' : '各模型互相审查本轮回答，仲裁给出最终结论',
       onclick: function () { doReview(am.roundId, { redo: hasReview }); }
     }, hasReview ? '重新审查' : '交叉审查'));
     tools.appendChild(U.el('button', {
@@ -1052,14 +1052,17 @@ window.MM = window.MM || {};
       ',' + (r.error ? 1 : 0) + ',' + (r.ms || 0)
     ).join(';');
     const mg = am.merge ? am.merge.content.length + ',' + am.merge.mode + ',' + (am.merge.usage ? 1 : 0) : '-';
-    // 交叉审查状态也要进签名：审查完成/失败会变卡内容，池里旧节点必须失效重建
-    const rv = am.review
-      ? (am.review.items || []).map(i => (i.status || '') + ':' + (i.content || '').length).join(';') +
-        '|' + (am.review.verdict
-          ? am.review.verdict.content.length + (am.review.verdict.usage ? 'u' : '') + (am.review.verdict.stopped ? 's' : '')
-          : '-') + (am.review.stopped ? 'S' : '')
+    // 交叉审查状态也要进签名：审查完成/失败会变卡内容，池里旧节点必须失效重建。
+    // 活跃份 + 份数/指针一起进签名：切换历史或新增审查时同样触发重建
+    const rvA = activeReviewOf(am);
+    const rv = rvA
+      ? (rvA.items || []).map(i => (i.status || '') + ':' + (i.content || '').length).join(';') +
+        '|' + (rvA.verdict
+          ? rvA.verdict.content.length + (rvA.verdict.usage ? 'u' : '') + (rvA.verdict.stopped ? 's' : '')
+          : '-') + (rvA.stopped ? 'S' : '')
       : '';
-    return 'A:' + u + '|' + am.active + ',' + ((am.versions || []).length) + '|' + rs + '|' + mg + '|' + rv;
+    return 'A:' + u + '|' + am.active + ',' + ((am.versions || []).length) + '|' + rs + '|' + mg + '|' + rv +
+      '|R' + ((am.reviews || []).length) + ',' + (typeof am.reviewActive === 'number' ? am.reviewActive : -1);
   }
 
   function renderAll() {
@@ -1160,9 +1163,9 @@ window.MM = window.MM || {};
               }
             }
             const liveReview = live && live.type === 'review';
-            if (liveReview || reviewHasContent(am.review)) {
-              const rc = reviewCard(am.review, !!liveReview, am.roundId, am.results,
-                liveReview ? live.ctx.reviewPhase : null);
+            if (liveReview || hasAnyReview(am)) {
+              const rc = reviewCard(liveReview ? live.ctx.review : activeReviewOf(am), !!liveReview, am.roundId, am.results,
+                liveReview ? live.ctx.reviewPhase : null, am);
               frag.appendChild(rc);
               mids.push(rc);
               if (liveReview) {
@@ -1674,7 +1677,7 @@ window.MM = window.MM || {};
         // 重试成功后旧综合容易被当成最新结论，提醒一句（重试失败则旧综合仍准确，不打扰）
         const retried = (am.results || []).find(r => r.modelId === ctx.retryModelId);
         if (retried && (retried.status === 'done' || retried.status === 'stopped')) {
-          U.toast('回答已更新' + (reviewHasContent(am.review) ? '，综合回答与交叉审查仍是旧版，可点「重新综合」「重新审查」更新' : '，综合回答仍是旧版，可点「重新综合」更新'));
+          U.toast('回答已更新' + (hasAnyReview(am) ? '，综合回答与交叉审查仍是旧版，可点「重新综合」「重新审查」更新' : '，综合回答仍是旧版，可点「重新综合」更新'));
         }
       }
       return;
@@ -2039,10 +2042,11 @@ window.MM = window.MM || {};
         }
       }
     }
-    // 交叉审查：各审查员的发现 + 仲裁结论
-    if (am.review) {
-      const rvItems = (am.review.items || []).filter(i => i.content);
-      const vContent = am.review.verdict && am.review.verdict.content;
+    // 交叉审查：各审查员的发现 + 仲裁结论（导出活跃份——与综合版本导出同语义）
+    const reviewOut = activeReviewOf(am);
+    if (reviewOut) {
+      const rvItems = (reviewOut.items || []).filter(i => i.content);
+      const vContent = reviewOut.verdict && reviewOut.verdict.content;
       if (rvItems.length || vContent) {
         L.push('');
         L.push('## 交叉审查');
@@ -2132,12 +2136,13 @@ window.MM = window.MM || {};
           L.push('');
           L.push(am.merge.content);
         }
-        // 会话导出只带仲裁结论（互审发现全文较长，按轮导出里有完整版）
-        if (am.review && am.review.verdict && am.review.verdict.content) {
+        // 会话导出只带仲裁结论（互审发现全文较长，按轮导出里有完整版）；取活跃份
+        const rvOut = activeReviewOf(am);
+        if (rvOut && rvOut.verdict && rvOut.verdict.content) {
           L.push('');
           L.push('### 交叉审查结论');
           L.push('');
-          L.push(am.review.verdict.content);
+          L.push(rvOut.verdict.content);
         }
       } else {
         L.push('');
@@ -2430,12 +2435,53 @@ window.MM = window.MM || {};
     return !!review && (!!review.verdict || (review.items || []).some(i => i.content));
   }
 
-  // phase：2=互审进行中 3=仲裁进行中 null=已完成/历史重绘
-  function reviewCard(review, live, roundId, results, phase) {
+  // ---------- 审查版本化（③） ----------
+  // am.reviews 数组（旧→新），am.reviewActive 指当前展示份；上限 REVIEW_CAP 份，
+  // 裁剪时旧审查用量折进 am.prunedTokens（统计总量不断账）。切换只换显示（档案
+  // 语义，与综合版本切换同款交互），不影响综合回答与后续轮。
+  // 写入端只新增不覆盖：「重新审查」= 新增一份记录（旧数据 m.review 由 normalizeSessions 迁移）
+  const REVIEW_CAP = 5;
+  function activeReviewOf(am) {
+    if (!Array.isArray(am.reviews) || !am.reviews.length) return null;
+    const i = (typeof am.reviewActive === 'number' && am.reviewActive >= 0 && am.reviewActive < am.reviews.length)
+      ? am.reviewActive : am.reviews.length - 1;
+    return am.reviews[i] || null;
+  }
+  function hasAnyReview(am) {
+    return (am.reviews || []).some(rv => reviewHasContent(rv)) || reviewHasContent(am.review);
+  }
+  // 被裁剪审查的真实用量合计（与 prunedTokensOf 同口径：input+output）
+  function droppedReviewTokens(reviews) {
+    let sum = 0;
+    const add = u => { if (u) sum += (u.input || 0) + (u.output || 0); };
+    for (const rv of (reviews || [])) {
+      for (const it of (rv.items || [])) if (it) add(it.usage);
+      if (rv.verdict) add(rv.verdict.usage);
+    }
+    return sum;
+  }
+
+  // phase：2=互审进行中 3=仲裁进行中 null=已完成/历史重绘；am 用于审查历史切换（③）
+  function reviewCard(review, live, roundId, results, phase, am) {
     const card = U.el('div', { class: 'review-card', 'data-role': 'review', 'data-round': roundId || '' });
     const rStatus = U.el('span', { class: 'ac-status' });
-    card.appendChild(U.el('div', { class: 'ac-head' },
-      U.el('span', { class: 'ac-name' }, '交叉审查'), rStatus));
+    const headKids = [U.el('span', { class: 'ac-name' }, '交叉审查')];
+    // 审查历史切换：多于一份时出现，与综合版本切换同款交互；只换显示不影响数据
+    if (am && Array.isArray(am.reviews) && am.reviews.length > 1) {
+      const idx = (typeof am.reviewActive === 'number' && am.reviewActive >= 0 && am.reviewActive < am.reviews.length)
+        ? am.reviewActive : am.reviews.length - 1;
+      const go = d => function () {
+        if (streaming) { U.toast('请等待当前任务完成', true); return; }
+        const ni = Math.max(0, Math.min(am.reviews.length - 1, idx + d));
+        if (ni === idx) return;
+        am.reviewActive = ni;
+        renderAll();
+      };
+      headKids.push(U.el('button', { class: 'tool-btn', title: '上一次审查', html: U.svgIcon('left', 9), onclick: go(-1), disabled: idx <= 0 }));
+      headKids.push(U.el('span', { class: 'ver-label' }, '审查 ' + (idx + 1) + '/' + am.reviews.length));
+      headKids.push(U.el('button', { class: 'tool-btn', title: '下一次审查', html: U.svgIcon('right', 9), onclick: go(1), disabled: idx >= am.reviews.length - 1 }));
+    }
+    card.appendChild(U.el('div', { class: 'ac-head' }, headKids.concat([rStatus])));
     const body = U.el('div', { class: 'ac-body' });
     card.appendChild(body);
     const findings = U.el('div', { class: 'rv-findings' });
@@ -2533,13 +2579,13 @@ window.MM = window.MM || {};
   function updateReviewHeadStatus(ctx) {
     const refs = ctx.rvRefs;
     if (!refs || ctx.reviewPhase !== 2) return;
-    const items = ctx.am.review.items || [];
+    const items = ctx.review.items || [];
     const done = items.filter(i => i.status === 'done' || i.status === 'stopped').length;
     refs.headStatus.innerHTML = '<span class="spinner"></span> 互审中 ' + done + '/' + items.length + '…';
   }
 
   function finalizeReviewCard(ctx, failed) {
-    const review = ctx.am.review;
+    const review = ctx.review || activeReviewOf(ctx.am || {});
     const card = ctx.rvCard;
     if (card && card.isConnected && ctx.rvRefs) {
       const v = review.verdict;
@@ -2587,11 +2633,11 @@ window.MM = window.MM || {};
       .filter(r => (r.status === 'done' || r.status === 'stopped') && r.content)
       .map(r => ({ modelId: r.modelId, name: r.name, content: r.content }));
     if (okResults.length < 2) { U.toast('交叉审查至少需要两份成功回答', true); return; }
-    if (reviewHasContent(am.review)) {
-      if (!opts.redo) { U.toast('该轮已有交叉审查，可点「重新审查」覆盖', true); return; }
+    if (hasAnyReview(am)) {
+      if (!opts.redo) { U.toast('该轮已有审查记录，可点「重新审查」新增一份', true); return; }
       const okc = await U.confirm({
         title: '重新审查',
-        message: '将用当前设置重新进行交叉审查，覆盖现有的这一份。',
+        message: '将用当前设置再进行一次交叉审查，新增一份记录（历史保留，最多 5 份，最旧自动让位）。',
         okText: '重新审查'
       });
       if (!okc) return;
@@ -2607,16 +2653,24 @@ window.MM = window.MM || {};
     // 用本轮第一位回答者的模型兜底——flats[0] 可能是没配密钥的预置服务商，必然失败
     const arbiter = (cfg.synthSource && flats.find(m => m.id === cfg.synthSource)) || reviewers[0].model;
 
-    am.review = {
+    am.reviews = Array.isArray(am.reviews) ? am.reviews : [];
+    const review = {
       items: reviewers.map(x => ({ modelId: x.r.modelId, name: x.r.name, status: 'pending', content: '', usage: null, ms: 0 })),
       verdict: null, stopped: false, createdAt: Date.now()
     };
+    am.reviews.push(review);
+    if (am.reviews.length > REVIEW_CAP) {
+      // 超出上限的旧审查退出历史：其真实用量折进 prunedTokens，统计总量不断账
+      const dropped = am.reviews.splice(0, am.reviews.length - REVIEW_CAP);
+      am.prunedTokens = (am.prunedTokens || 0) + droppedReviewTokens(dropped);
+    }
+    am.reviewActive = am.reviews.length - 1;
     s.updatedAt = Date.now();
     MM.save();
 
     // 渲染实时卡片（插到综合卡片之后，没有综合卡就插到回答网格之后）
     const wrap = U.$('#messages');
-    const card = reviewCard(am.review, true, roundId, am.results, 2);
+    const card = reviewCard(review, true, roundId, am.results, 2, am);
     card.classList.add('anim-in');
     const inView = MM.sessions.current() === s;
     if (inView) {
@@ -2645,7 +2699,7 @@ window.MM = window.MM || {};
     const reqId = nextReqId('rev');
     pending.set(reqId, {
       reviewCtx: true, reviewPhase: 2, reviewStopped: false,
-      session: s, am: am, roundId: roundId,
+      session: s, am: am, roundId: roundId, review: review,
       arbiter: arbiter, okResults: okResults, userQuestion: userMsg.content,
       rvCard: inView ? card : null,
       rvRefs: inView ? reviewRefsOf(card) : null
@@ -2657,8 +2711,8 @@ window.MM = window.MM || {};
       streaming = null;
       setSendBtn(false);
       U.toast('交叉审查失败：' + e.message, true);
-      if (am && am.review) {
-        for (const it of am.review.items) if (it.status === 'pending' || it.status === 'streaming') { it.status = 'error'; it.error = e.message; }
+      if (review) {
+        for (const it of review.items) if (it.status === 'pending' || it.status === 'streaming') { it.status = 'error'; it.error = e.message; }
       }
       // 请求没能启动：把还空着的审查条目标成失败（有内容的保留半成品），再走统一收尾
       if (card && card.isConnected) {
@@ -2667,14 +2721,14 @@ window.MM = window.MM || {};
           if (b && !b.textContent) b.innerHTML = '<span style="color:var(--danger)">✗ 请求未能启动</span>';
         }
       }
-      finalizeReviewCard({ am: am, roundId: roundId, rvCard: card, rvRefs: inView ? reviewRefsOf(card) : null }, true);
+      finalizeReviewCard({ am: am, review: review, roundId: roundId, rvCard: card, rvRefs: inView ? reviewRefsOf(card) : null }, true);
       MM.save();
     }
   }
 
   // 阶段事件：delta/done/error 按 reviewPhase 分流（2=按审查条目，3=写进仲裁块）
   function onReviewEvent(ev, ctx) {
-    const review = ctx.am.review;
+    const review = ctx.review;
     if (ctx.reviewPhase === 3) {
       const v = review.verdict;
       if (!v) return;
@@ -2748,7 +2802,7 @@ window.MM = window.MM || {};
 
   // 阶段收尾（chat:send 的 all-done）：阶段二结束转仲裁或终止；阶段三结束落终态
   function onReviewAllDone(ctx) {
-    const review = ctx.am.review;
+    const review = ctx.review;
     if (ctx.reviewPhase === 2) {
       const anyDone = (review.items || []).some(i => i.status === 'done' && i.content);
       // 用户按了停止就必须停在这里：哪怕互审已有完成项，也不许再自发起新的仲裁请求

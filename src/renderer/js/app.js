@@ -524,15 +524,29 @@ MM.defaults = {
             }
           }
         }
-        const rv = am.review;
-        if (rv) {
-          let rvDirty = false;
-          for (const it of (rv.items || [])) {
-            if (it && (it.status === 'pending' || it.status === 'streaming')) { it.status = 'stopped'; rvDirty = true; }
+        // 审查版本化迁移（③）：旧单份 m.review → m.reviews 数组（活跃指向最新）。
+        // 上限 5 份由写入端裁剪；这里只保证形状归一，幂等
+        if (am.review && !Array.isArray(am.reviews)) {
+          am.reviews = [am.review];
+          am.reviewActive = 0;
+          delete am.review;
+          changed = true;
+        }
+        if (Array.isArray(am.reviews)) {
+          if (typeof am.reviewActive !== 'number' || am.reviewActive < 0 || am.reviewActive >= am.reviews.length) {
+            am.reviewActive = am.reviews.length - 1;
           }
-          if (rv.verdict && !rv.verdict.content && !rv.verdict.stopped) { rv.verdict.stopped = true; rvDirty = true; }
-          if (rvDirty && !rv.verdict) rv.stopped = true;
-          if (rvDirty) changed = true;
+          // 退出/崩溃时审查中间态归位（逐份，口径与旧单份一致）：非终态一律收口
+          for (const rv of am.reviews) {
+            if (!rv || typeof rv !== 'object') continue;
+            let rvDirty = false;
+            for (const it of (rv.items || [])) {
+              if (it && (it.status === 'pending' || it.status === 'streaming')) { it.status = 'stopped'; rvDirty = true; }
+            }
+            if (rv.verdict && !rv.verdict.content && !rv.verdict.stopped) { rv.verdict.stopped = true; rvDirty = true; }
+            if (rvDirty && !rv.verdict) rv.stopped = true;
+            if (rvDirty) changed = true;
+          }
         }
         // 综合占位被固化（开始了却没有任何内容）：删掉空卡，「综合回答」入口可重来
         if (am.merge && !am.merge.content && !am.merge.usage && !am.merge.stopped) {

@@ -411,12 +411,14 @@ server.listen(0, '127.0.0.1', () => {
           changed: changed,
           rA: am1.results[0].status, rB: am1.results[1].status, rBerr: am1.results[1].error || '',
           rC: am1.results[2].status,
-          itA: am1.review.items[0].status, itB: am1.review.items[1].status,
-          vStopped: !!am1.review.verdict.stopped, revStopped: !!am1.review.stopped,
+          itA: am1.reviews[0].items[0].status, itB: am1.reviews[0].items[1].status,
+          migrated: Array.isArray(am1.reviews) && am1.reviews.length === 1,
+          vStopped: !!am1.reviews[0].verdict.stopped, revStopped: !!am1.reviews[0].stopped,
           r2: am2.results[0].status, mergeGone: am2.merge === null
         };
       })()`);
       assert(t.changed === true, 'changed=' + t.changed);
+      assert(t.migrated === true, '旧单份 review 未迁移为 reviews 数组: ' + t);
       assert(t.rA === 'stopped' && t.rC === 'done', JSON.stringify(t));
       assert(t.rB === 'error' && t.rBerr.indexOf('中断') >= 0, JSON.stringify(t));
       assert(t.itA === 'stopped' && t.itB === 'stopped' && t.vStopped === true, JSON.stringify(t));

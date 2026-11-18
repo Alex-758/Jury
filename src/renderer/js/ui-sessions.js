@@ -45,10 +45,11 @@ window.MM = window.MM || {};
         for (const r of (m.results) || []) if (r) add(r.usage);
         if (m.merge) add(m.merge.usage);
       }
-      // 交叉审查（互审 + 仲裁）也是真实请求：审查不做版本化，挂在轮次上只记一次
-      if (m.review) {
-        for (const it of (m.review.items || [])) if (it) add(it.usage);
-        if (m.review.verdict) add(m.review.verdict.usage);
+      // 交叉审查（互审 + 仲裁）也是真实请求：逐份计（审查已版本化，旧份的用量不再消失；
+      // 被裁剪份的用量折在 prunedTokens 里）
+      for (const rv of (m.reviews || [])) {
+        for (const it of (rv.items || [])) if (it) add(it.usage);
+        if (rv.verdict) add(rv.verdict.usage);
       }
       total += m.prunedTokens || 0;
     }
@@ -84,9 +85,9 @@ window.MM = window.MM || {};
         for (const r of (m.results) || []) if (r) add(r.usage, r.modelId);
         if (m.merge) add(m.merge.usage, m.merge.modelId);
       }
-      if (m.review) {
-        for (const it of (m.review.items || [])) if (it) add(it.usage, it.modelId);
-        if (m.review.verdict) add(m.review.verdict.usage, m.review.verdict.modelId);
+      for (const rv of (m.reviews || [])) {
+        for (const it of (rv.items || [])) if (it) add(it.usage, it.modelId);
+        if (rv.verdict) add(rv.verdict.usage, rv.verdict.modelId);
       }
     }
     return any ? total : null;
