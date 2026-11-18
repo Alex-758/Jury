@@ -620,7 +620,8 @@ ipcMain.handle('data:import', async () => {
 function migrateLegacyData(freshDir, legacyDir) {
   const out = { migrated: false, copied: [] };
   try {
-    if (fs.existsSync(path.join(freshDir, 'store.json'))) return out; // 新目录已有数据
+    // 新目录已有数据（旧版单文件或新版分文件）都不迁移：重复运行过的目录不得被旧数据覆盖
+    if (fs.existsSync(path.join(freshDir, 'store.json')) || fs.existsSync(path.join(freshDir, 'config.json'))) return out;
     if (!fs.existsSync(path.join(legacyDir, 'store.json'))) return out; // 旧目录无数据
     fs.mkdirSync(freshDir, { recursive: true }); // 首次启动新目录可能尚未创建
     for (const f of ['store.json', 'catalog.json', 'window-state.json']) {
@@ -678,13 +679,15 @@ app.whenReady().then(() => {
         '请勿把数据文件复制到网盘、聊天工具或不可信位置。'
     });
   }
-  // 图片附件目录 + mmimg:// 协议；顺带清理已无会话引用的孤儿图片。
-  // 数据文件损坏时本次以空库启动：gc 会把"无引用"理解为"全部孤儿"，把可恢复数据
-  // 引用的图片一并删掉——跳过本次清理，用户恢复 .corrupt 备份后引用才不会悬空
+  // 图片附件目录 + mmimg:// 协议；孤儿图片清理推迟到窗口显示之后（启动提速）：
+  // gc 要遍历全部会话消息引用 + 扫图片目录，图片多时是启动路径上的纯同步 IO，
+  // 而它不参与首帧渲染。运行时取当前 db.sessions，晚跑不会误删新保存的图片。
+  // 数据文件损坏时本次跳过清理：gc 会把"无引用"理解为"全部孤儿"，把可恢复数据
+  // 引用的图片一并删掉——等用户恢复 .corrupt 备份后引用才不会悬空
   images.init(store.dir());
   images.registerProtocol();
-  if (!bad) images.gc(db.sessions);
   createWindow();
+  if (!bad) setTimeout(() => { try { images.gc(db.sessions); } catch (e) { /* 清理失败不影响使用 */ } }, 2500);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

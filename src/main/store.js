@@ -236,7 +236,10 @@ function migrateLegacy() {
     console.log('[store] 旧版 store.json 已拆分为分文件布局，原文件留档为 ' + path.basename(keep));
     return true;
   } catch (e) {
-    console.warn('[store] 旧版数据拆分失败（不影响启动）：', e && e.message);
+    // 拆分写盘失败（磁盘满/无权限等）：不能静默当空库启动——记进 corrupts 让主进程
+    // 弹窗提示，旧文件原样保留，下次启动重试拆分
+    corrupts.push({ file: legacy, backup: '', message: '旧版数据拆分写盘失败：' + (e && e.message) });
+    console.warn('[store] 旧版数据拆分失败：', e && e.message);
     return false;
   }
 }
