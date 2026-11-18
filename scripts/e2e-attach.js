@@ -521,6 +521,18 @@ async function main() {
     })`);
     assert(t1.badges >= 2 && t1.dots >= t1.badges, JSON.stringify(t1));    assert(t1.flag, '分歧小节未加 sec-flag 标识');
     assert(t1.badgeTitle.indexOf('来自：') === 0, '角标悬停应显示来源: ' + t1.badgeTitle);
+    // 装饰缓存（②）：首次装饰写入 am.merge.deco（签名+块表），随会话落盘；
+    // 重绘走缓存命中路径，跳过余弦匹配重算，角标照常渲染
+    const d1 = JSON.parse(await js(`(function(){
+      var s = MM.sessions.current();
+      var am = s.messages[s.messages.length - 1];
+      return JSON.stringify({ deco: !!(am.merge && am.merge.deco && am.merge.deco.v === 1 &&
+        am.merge.deco.h && Array.isArray(am.merge.deco.blocks) && am.merge.deco.blocks.length >= 1) });
+    })()`));
+    assert(d1.deco, '装饰缓存未写入（am.merge.deco 缺失）');
+    await js('MM.chat.renderAll()');
+    assert(await waitFor("document.querySelectorAll('.merge-card .merge-src').length >= 2", 5000),
+      '缓存命中重绘后角标丢失');
     // 点击角标：跳到含 2048 的模型卡片并闪烁
     await js(`document.querySelector('.merge-card .merge-src').click()`);
     await sleep(200);

@@ -704,6 +704,9 @@ window.MM = window.MM || {};
   const srcCache = new WeakMap();
   function srcCacheEntry(msg, results) {
     let sig = 5381;
+    // 报告正文也进签名：内容变了块结构就变，角标/溯源/覆盖缓存必须随之失效
+    const mc = String((msg && msg.content) || '');
+    for (let i = 0; i < mc.length; i++) sig = ((sig << 5) + sig + mc.charCodeAt(i)) | 0;
     for (const r of (results || [])) {
       const c = String((r && r.content) || '');
       const key = (r && r.modelId) + '\u0000' + c.length + '\u0000' + c;
@@ -746,12 +749,30 @@ window.MM = window.MM || {};
     // 再做全部匹配与追加——逐块"读布局→写 DOM"交替会让每块强制重排一次
     const blocks = Array.from(body.querySelectorAll('p, li'))
       .map(el => ({ el: el, text: (el.innerText || '').trim() }));
-    for (const b of blocks) {
-      if (b.el.querySelector('.merge-src')) continue;
+    // 装饰缓存（②持久化）：msg.deco 签名一致且块数一致 → 直接套用持久化结果，
+    // 跳过 blockMatches 余弦匹配与 analyze 重算（冷开大会话的秒级开销 → 近零）；
+    // 未命中则算完后写回 msg.deco，随会话文件落盘（版本快照剥离，见 snapshotOf）
+    const cached = msg.deco;
+    const cacheHit = !!(cached && cached.v === 1 && cached.h === entry.sig &&
+      Array.isArray(cached.blocks) && cached.blocks.length === blocks.length);
+    const nameOf = mid => {
+      const r = (results || []).find(x => x && x.modelId === mid);
+      return (r && r.name) || mid;
+    };
+    let allFresh = true; // 已装饰过的块会跳过：此时不能写缓存（漏块的空结果会污染下次冷开）
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const b = blocks[bi];
+      if (b.el.querySelector('.merge-src')) { allFresh = false; continue; }
       if (b.text.length < 12) continue; // 短标题类不标
       // hits：每个命中模型 + 池内最佳匹配原句（点击跳转后高亮具体段落用）
-      let hits = entry.hits.get(b.text);
-      if (!hits) { hits = MM.merge.blockMatches(b.text, entry.pool); entry.hits.set(b.text, hits); }
+      let hits;
+      if (cacheHit) {
+        const c = cached.blocks[bi] || {};
+        hits = (c.m || []).map((mid, k) => ({ modelId: mid, name: nameOf(mid), text: (c.s || [])[k] || '' }));
+      } else {
+        hits = entry.hits.get(b.text);
+        if (!hits) { hits = MM.merge.blockMatches(b.text, entry.pool); entry.hits.set(b.text, hits); }
+      }
       if (!hits.length) continue;
       const models = hits.map(h => ({ modelId: h.modelId, name: h.name }));
       // 每个模型的色点各自可点，多来源块不再只能跳到第一家；
@@ -794,18 +815,37 @@ window.MM = window.MM || {};
     }
     // b) 共识覆盖：预分析的共识要点没出现在报告里时，正文下方给一行提示；
     // 提示挂在 body 之外（卡片上），复制综合回答不会带入
-    if (!entry.analysis) entry.analysis = MM.merge.analyze(results);
-    if (!('uncovered' in entry)) entry.uncovered = MM.merge.uncoveredConsensus(entry.analysis.consensus, msg.content);
-    if (entry.uncovered.length) {
+    let unc;
+    if (cacheHit) {
+      unc = Array.isArray(cached.unc) ? cached.unc : [];
+    } else {
+      if (!entry.analysis) entry.analysis = MM.merge.analyze(results);
+      if (!('uncovered' in entry)) entry.uncovered = MM.merge.uncoveredConsensus(entry.analysis.consensus, msg.content);
+      unc = entry.uncovered;
+    }
+    if (unc.length) {
       const card = body.closest('.merge-card, .review-card');
       if (card && !card.querySelector('.merge-cov')) {
         // 审查卡片上对应的动作是「重新审查」而不是「重新综合」：提示指向用户实际能点的按钮
         const redo = body.closest('.review-card') ? '重新审查' : '重新综合';
         body.insertAdjacentElement('afterend', U.el('div', {
           class: 'merge-cov',
-          title: entry.uncovered.map(t => '· ' + t).join('\n')
-        }, '⚠ ' + entry.uncovered.length + ' 条共识要点未出现在报告中，可' + redo + '补全'));
+          title: unc.map(t => '· ' + t).join('\n')
+        }, '⚠ ' + unc.length + ' 条共识要点未出现在报告中，可' + redo + '补全'));
       }
+    }
+    // 未命中缓存且这次是全量新算（没有跳过已装饰块）：写回缓存随会话落盘。
+    // 命中句文本截断防膨胀；块数上限防病态超长报告把会话文件撑大
+    if (!cacheHit && allFresh && blocks.length <= 400) {
+      const cap = s => String(s || '').slice(0, 240);
+      msg.deco = {
+        v: 1, h: entry.sig, unc: unc.slice(0, 20),
+        blocks: blocks.map(b => {
+          const hs = entry.hits.get(b.text) || [];
+          return { m: hs.map(h => h.modelId), s: hs.map(h => cap(h.text)) };
+        })
+      };
+      MM.save();
     }
   }
 
@@ -849,9 +889,12 @@ window.MM = window.MM || {};
   // ---------- 版本历史 ----------
   // 每轮回答的快照：{ results, merge, at }；am.active 指向当前显示的版本
   function snapshotOf(am) {
+    // 版本池不带装饰缓存（deco）：切版本走重算（低频路径），池不随缓存膨胀
+    const merge = am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
+    if (merge && merge.deco) delete merge.deco;
     return {
       results: JSON.parse(JSON.stringify(am.results || [])),
-      merge: am.merge ? JSON.parse(JSON.stringify(am.merge)) : null,
+      merge: merge,
       at: Date.now()
     };
   }
@@ -2313,7 +2356,9 @@ window.MM = window.MM || {};
   function syncMergeToVersion(am) {
     if (am && Array.isArray(am.versions) && am.versions.length) {
       const i = am.active >= 0 ? am.active : am.versions.length - 1;
-      am.versions[i].merge = am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
+      const copy = am.merge ? JSON.parse(JSON.stringify(am.merge)) : null;
+      if (copy && copy.deco) delete copy.deco; // 版本池不带装饰缓存（与 snapshotOf 同口径）
+      am.versions[i].merge = copy;
     }
   }
 

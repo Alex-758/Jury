@@ -148,12 +148,18 @@ app.whenReady().then(async () => {
       tokens1:MM.sessions._sessionTokensForTest(s),
       v:am.versions.length,
       merged:!!(am.merge && am.merge.content && am.merge.content !== '旧综合'),
-      oldKept:am.versions[0].merge && am.versions[0].merge.content === '旧综合'});
+      oldKept:am.versions[0].merge && am.versions[0].merge.content === '旧综合',
+      deco:!!(am.merge && am.merge.deco && am.merge.deco.v === 1 && am.merge.deco.h && Array.isArray(am.merge.deco.blocks)),
+      snapClean:am.versions.every(function(v){ return !(v.merge && v.merge.deco); })});
   })()`);
   o = JSON.parse(r);
   check('重综合压栈副本并保留旧综合（可回滚）', o.v === 2 && o.oldKept === true, r);
   check('token 统计不因重综合翻倍', o.tokens0 === 1900 && o.tokens1 === 1900, r);
   check('重综合生成新内容', o.merged === true, r);
+  // 装饰缓存（②）：综合完成时角标匹配结果写入 am.merge.deco，随会话落盘；
+  // 版本快照剥离缓存，池不膨胀
+  check('装饰缓存写入活跃综合（deco v1+签名+块表）', o.deco === true, r);
+  check('版本快照剥离装饰缓存（池不膨胀）', o.snapClean === true, r);
 
   // 结果在快照之后发生过变化（模拟单模型重试）：all-done 现在给这种快照打
   // partial 标记（只真实重发了一个模型），sessionTokens 只计 partialModelId
