@@ -164,6 +164,33 @@ server.listen(0, '127.0.0.1', () => {
   }, null, 1), 'utf8');
 
   require(path.join(ROOT, 'src', 'main', 'main.js'));
+  // 分文件布局读盘：组装旧形态 { config, sessions }（顺序按 sessions/index.json）
+  function readDisk(DATA) {
+    const out = { config: null, sessions: [] };
+    try { out.config = JSON.parse(fs.readFileSync(path.join(DATA, 'config.json'), 'utf8')).config; } catch (e) { /* ignore */ }
+    const sdir = path.join(DATA, 'sessions');
+    const byId = {};
+    try {
+      for (const f of fs.readdirSync(sdir)) {
+        if (!f.endsWith('.json') || f === 'index.json' || f.indexOf('.corrupt-') >= 0) continue;
+        try { const s = JSON.parse(fs.readFileSync(path.join(sdir, f), 'utf8')); if (s && s.id) byId[s.id] = s; } catch (e) { /* 隔离文件 */ }
+      }
+    } catch (e) { /* 无 sessions 目录 */ }
+    let order = null;
+    try { order = JSON.parse(fs.readFileSync(path.join(sdir, 'index.json'), 'utf8')).order; } catch (e) { /* 无 index */ }
+    for (const id of (Array.isArray(order) ? order : Object.keys(byId))) {
+      if (byId[id]) out.sessions.push(byId[id]);
+    }
+    return out;
+  }
+  function corruptFiles(DATA) {
+    const out = [];
+    for (const d of [DATA, path.join(DATA, 'sessions')]) {
+      try { for (const f of fs.readdirSync(d)) if (f.indexOf('.corrupt-') >= 0) out.push(path.join(d, f)); } catch (e) { /* 目录缺失 */ }
+    }
+    return out;
+  }
+
 
   app.whenReady().then(async () => {
     await sleep(1600);
@@ -601,7 +628,7 @@ server.listen(0, '127.0.0.1', () => {
       const req = lastReq();
       assert(req.body.messages.some(function(m){ return m.role === 'system' && /联网搜索结果/.test(m.content); }), '请求缺少搜索结果注入');
       await sleep(300);
-      const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+      const disk = readDisk(DATA);
       const ss = disk.sessions.find(function(x){ return x.title === '搜索来源测试'; });
       assert(ss && ss.messages.find(function(m){ return m.role === 'assistant'; }).results[0].sources.length === 2, '搜索来源未持久化');
       mockSearchResults = null;
@@ -633,7 +660,7 @@ server.listen(0, '127.0.0.1', () => {
         document.querySelector('.pm-head-ops .btn-primary').click();
       })()`);
       await sleep(600);
-      const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+      const disk = readDisk(DATA);
       const p1 = disk.config.providers.find(p => p.id === 'p1');
       assert(p1 && p1.models[0].contextTokens === 55555, JSON.stringify(p1 && p1.models[0]));
       assert(p1.apiKey && typeof p1.apiKey === 'object' && p1.apiKey.enc, '磁盘密钥未加密: ' + JSON.stringify(p1.apiKey));
@@ -905,7 +932,7 @@ server.listen(0, '127.0.0.1', () => {
       })()`);
       assert(t.title === '旧会话', '标题=' + t.title);
       assert(t.hasKey === true && t.apiKey === undefined && t.ctx === 1000 && t.chip === true, JSON.stringify(t));
-      const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+      const disk = readDisk(DATA);
       const lp = disk.config.providers.find(p => p.id === 'legacy');
       assert(lp && lp.apiKey && typeof lp.apiKey === 'object' && lp.apiKey.enc, '磁盘密钥未加密');
       await js('MM.settings.close()');
@@ -981,12 +1008,12 @@ server.listen(0, '127.0.0.1', () => {
 
     // ---------- 21. 最终磁盘状态 ----------
     await run('最终落盘：会话保留、密钥加密、无损坏备份', async () => {
-      const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+      const disk = readDisk(DATA);
       const lp = disk.config.providers.find(p => p.id === 'legacy');
       assert(Array.isArray(disk.sessions) && disk.sessions.length === 1, 'sessions=' + (disk.sessions || []).length);
       assert(disk.sessions[0].title === '旧会话', 'title=' + disk.sessions[0].title);
       assert(lp && lp.apiKey && lp.apiKey.enc, '密钥未加密');
-      const corrupts = fs.readdirSync(DATA).filter(f => f.indexOf('.corrupt-') >= 0);
+      const corrupts = corruptFiles(DATA);
       assert(corrupts.length === 0, '出现损坏备份: ' + JSON.stringify(corrupts));
       return JSON.stringify({ sessions: disk.sessions.length, enc: !!lp.apiKey.enc });
     });

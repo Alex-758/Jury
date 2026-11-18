@@ -23,6 +23,33 @@ dialog.showErrorBox = () => {};
 
 // main.js 必须在 app ready 之前加载：registerScheme() 要求 ready 前注册
 require(path.join(ROOT, 'src', 'main', 'main.js'));
+// 分文件布局读盘：组装旧形态 { config, sessions }（顺序按 sessions/index.json）
+function readDisk(DATA) {
+  const out = { config: null, sessions: [] };
+  try { out.config = JSON.parse(fs.readFileSync(path.join(DATA, 'config.json'), 'utf8')).config; } catch (e) { /* ignore */ }
+  const sdir = path.join(DATA, 'sessions');
+  const byId = {};
+  try {
+    for (const f of fs.readdirSync(sdir)) {
+      if (!f.endsWith('.json') || f === 'index.json' || f.indexOf('.corrupt-') >= 0) continue;
+      try { const s = JSON.parse(fs.readFileSync(path.join(sdir, f), 'utf8')); if (s && s.id) byId[s.id] = s; } catch (e) { /* 隔离文件 */ }
+    }
+  } catch (e) { /* 无 sessions 目录 */ }
+  let order = null;
+  try { order = JSON.parse(fs.readFileSync(path.join(sdir, 'index.json'), 'utf8')).order; } catch (e) { /* 无 index */ }
+  for (const id of (Array.isArray(order) ? order : Object.keys(byId))) {
+    if (byId[id]) out.sessions.push(byId[id]);
+  }
+  return out;
+}
+function corruptFiles(DATA) {
+  const out = [];
+  for (const d of [DATA, path.join(DATA, 'sessions')]) {
+    try { for (const f of fs.readdirSync(d)) if (f.indexOf('.corrupt-') >= 0) out.push(path.join(d, f)); } catch (e) { /* 目录缺失 */ }
+  }
+  return out;
+}
+
 
 app.whenReady().then(async () => {
   try {
@@ -115,7 +142,7 @@ app.whenReady().then(async () => {
         clearTimeout(t1);
         check('点击关闭：窗口销毁', true);
         try {
-          const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+          const disk = readDisk(DATA);
           check('关闭前自动落盘（app:flush 把未保存改动写入磁盘）',
             disk.sessions.some(s => s && s.title === 'flush-未保存标记'),
             JSON.stringify(disk.sessions.map(s => s && s.title)));

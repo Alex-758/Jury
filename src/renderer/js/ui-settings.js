@@ -901,7 +901,7 @@ window.MM = window.MM || {};
         // 导入是覆盖性操作：先确认再选文件。原数据由主进程在覆盖前自动备份
         const ok = await U.confirm({
           title: '导入数据',
-          message: '导入将覆盖当前全部数据（模型配置与所有会话）。覆盖前会自动把当前数据备份为 store.json.pre-import-<时间戳>。确定继续？',
+          message: '导入将覆盖当前全部数据（模型配置与所有会话）。覆盖前会自动把当前数据整库备份到 backups/pre-import-<时间戳>/ 目录。确定继续？',
           okText: '导入',
           danger: true
         });

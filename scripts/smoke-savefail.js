@@ -1,5 +1,5 @@
 'use strict';
-// 冒烟：写盘失败路径（store.json 是目录 → rename 必失败）。
+// 冒烟：写盘失败路径（config.json 是目录 → rename 必失败）。
 // 覆盖 D9：脏标记 + 可见提示 + 关窗时不许静默丢数据（强提示横门 → 明确放弃才关）
 // 用法：npx electron scripts/smoke-savefail.js
 const { app, BrowserWindow, dialog } = require('electron');
@@ -17,8 +17,8 @@ function check(name, ok, detail) {
 }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// store.json 是一个目录：load() 读失败按首次启动走，save() 的 rename 必失败
-fs.mkdirSync(path.join(tmp, 'store.json'));
+// config.json 是一个目录：load() 读失败按隔离处理，save() 的 rename 必失败
+fs.mkdirSync(path.join(tmp, 'config.json'));
 
 dialog.showMessageBox = async () => ({ response: 0 });
 dialog.showMessageBoxSync = () => 0;

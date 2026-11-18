@@ -77,6 +77,9 @@ async function main() {
   await sleep(1600);
   const w = BrowserWindow.getAllWindows()[0];
   if (!w) { console.log('FAIL | 窗口未创建'); app.exit(1); return; }
+  // 窗口被遮挡/隐藏时 Electron 节流 RAF 与空闲回调：综合报告角标走 requestIdleCallback
+  // 延迟补渲染（E2），节流下不醒来 → 「来源角标未在空闲时段渲染」间歇挂（与 e2e-app/deep/sessions 同因）
+  try { w.setBackgroundThrottling(false); } catch (e) { /* 老版本无此 API 时按原样跑 */ }
   const js = code => w.webContents.executeJavaScript(code, true);
   async function waitFor(expr, timeout) {
     const t0 = Date.now();

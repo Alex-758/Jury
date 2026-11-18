@@ -267,13 +267,13 @@ ipcMain.handle('store:save', (e, data) => {
       : (Array.isArray(db.sessions) ? db.sessions : [])
   };
   const r = store.save(db);
-  // 多实例冲突：旧数据已带时间戳备份，弹窗提示一次
+  // 多实例冲突：被外部改动过的文件已备份进 backups/bak-<时间戳>/，弹窗提示一次
   if (r && r.conflict && !conflictNotified) {
     conflictNotified = true;
     dialog.showMessageBox({
       type: 'warning',
       title: '检测到多实例写入',
-      message: '检测到另一个 Jury 实例修改了数据文件。\n\n旧数据已自动备份为 store.json.bak-<时间戳>（位于 %APPDATA%\\Jury，保留最近 5 份），本次保存可能覆盖另一实例的最新改动。请尽量避免同时运行多个实例。'
+      message: '检测到另一个 Jury 实例修改了数据文件。\n\n被改动文件的旧数据已自动备份到 %APPDATA%\\Jury\\backups\\bak-<时间戳>\\（保留最近 5 份），本次保存可能覆盖另一实例的最新改动。请尽量避免同时运行多个实例。'
     });
   }
   return true;
@@ -650,12 +650,14 @@ app.whenReady().then(() => {
   if (loaded) db = { config: loaded.config || {}, sessions: loaded.sessions || [] };
   const bad = store.corruptInfo();
   if (bad) {
+    const lines = bad.items.map(it =>
+      '· ' + it.file + '\n  ' + (it.backup ? '已隔离备份为 ' + it.backup : '（隔离备份失败，请手动备份）') + '\n  ' + it.message
+    ).join('\n');
     dialog.showMessageBox({
       type: 'warning',
-      title: '数据文件损坏',
-      message: '本地数据文件（store.json）无法解析，本次将以空配置启动。\n\n' +
-        (bad.backup ? '原文件已备份为：\n' + bad.backup : '原文件备份失败，请手动备份。') +
-        '\n\n错误信息：' + bad.message
+      title: '部分数据文件损坏',
+      message: '以下数据文件无法解析，已隔离备份（不会覆盖）。\n\n' + lines +
+        '\n\n其余数据已正常加载。' + (loaded ? '' : '\n\n主数据文件损坏时本次将以空数据启动；\n从隔离备份恢复文件后重启即可找回数据。')
     });
   }
   const lostKeys = store.decryptInfo();

@@ -1,6 +1,6 @@
 'use strict';
 // 附件的持久化与内容提取：
-// - 图片存 userData/images/<id>.<ext>，消息里只存 {id, ext} 引用，store.json 不膨胀
+// - 图片存 userData/images/<id>.<ext>，消息里只存 {id, ext} 引用，会话数据文件不膨胀
 // - Windows 系统 OCR（PowerShell 调 WinRT OcrEngine）提取图中文字，供纯文本模型使用
 // - mmimg:// 协议把图片安全地喂给渲染层 <img>（id/ext 白名单校验，只能访问 images 目录）
 // - extractDoc：文档全文提取，双通道按格式路由——PDF/Word 走进程内 JS 库

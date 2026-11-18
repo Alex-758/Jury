@@ -103,6 +103,33 @@ server.listen(0, '127.0.0.1', () => {
     sessions: [{ id: 's0', title: '新会话', createdAt: 1, updatedAt: 1, pinned: false, messages: [] }]
   }, null, 1), 'utf8');
   require(path.join(ROOT, 'src', 'main', 'main.js'));
+  // 分文件布局读盘：组装旧形态 { config, sessions }（顺序按 sessions/index.json）
+  function readDisk(DATA) {
+    const out = { config: null, sessions: [] };
+    try { out.config = JSON.parse(fs.readFileSync(path.join(DATA, 'config.json'), 'utf8')).config; } catch (e) { /* ignore */ }
+    const sdir = path.join(DATA, 'sessions');
+    const byId = {};
+    try {
+      for (const f of fs.readdirSync(sdir)) {
+        if (!f.endsWith('.json') || f === 'index.json' || f.indexOf('.corrupt-') >= 0) continue;
+        try { const s = JSON.parse(fs.readFileSync(path.join(sdir, f), 'utf8')); if (s && s.id) byId[s.id] = s; } catch (e) { /* 隔离文件 */ }
+      }
+    } catch (e) { /* 无 sessions 目录 */ }
+    let order = null;
+    try { order = JSON.parse(fs.readFileSync(path.join(sdir, 'index.json'), 'utf8')).order; } catch (e) { /* 无 index */ }
+    for (const id of (Array.isArray(order) ? order : Object.keys(byId))) {
+      if (byId[id]) out.sessions.push(byId[id]);
+    }
+    return out;
+  }
+  function corruptFiles(DATA) {
+    const out = [];
+    for (const d of [DATA, path.join(DATA, 'sessions')]) {
+      try { for (const f of fs.readdirSync(d)) if (f.indexOf('.corrupt-') >= 0) out.push(path.join(d, f)); } catch (e) { /* 目录缺失 */ }
+    }
+    return out;
+  }
+
 
   app.whenReady().then(async () => {
     await sleep(1600);
@@ -299,7 +326,7 @@ server.listen(0, '127.0.0.1', () => {
 
     // ---------- 8. 导入含非法会话条目 ----------
     await run('导入含 null 会话：主进程过滤，不崩溃', async () => {
-      const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+      const disk = readDisk(DATA);
       nextOpen = path.join(DATA, 'import-bad.json');
       fs.writeFileSync(nextOpen, JSON.stringify({
         config: disk.config,
@@ -448,11 +475,11 @@ server.listen(0, '127.0.0.1', () => {
 
     // ---------- 11. 最终落盘 ----------
     await run('最终落盘：无 null 会话、密钥加密', async () => {
-      const disk = JSON.parse(fs.readFileSync(path.join(DATA, 'store.json'), 'utf8'));
+      const disk = readDisk(DATA);
       assert(Array.isArray(disk.sessions) && disk.sessions.every(s => s && typeof s === 'object'), 'sessions 含非法条目');
       const p1 = disk.config.providers.find(p => p.id === 'p1');
       assert(p1 && p1.apiKey && p1.apiKey.enc, '密钥未加密');
-      const corrupts = fs.readdirSync(DATA).filter(f => f.indexOf('.corrupt-') >= 0);
+      const corrupts = corruptFiles(DATA);
       assert(corrupts.length === 0, JSON.stringify(corrupts));
       return JSON.stringify({ sessions: disk.sessions.length, enc: !!p1.apiKey.enc });
     });
