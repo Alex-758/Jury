@@ -101,7 +101,7 @@ function needsCompletionTokens(m) {
 }
 
 function buildBody(m, messages, opts) {
-  const { stream, searchOn } = opts;
+  const { stream, searchOn, includeUsage } = opts;
   messages = withImageParts(m, messages);
   if (m.apiFormat === 'anthropic') {
     const system = messages.filter(r => r.role === 'system').map(r => r.content).join('\n\n');
@@ -119,10 +119,14 @@ function buildBody(m, messages, opts) {
     }
   }
   // 流式用量统计：OpenAI 格式默认不在流里回 usage，需显式开启。
-  // 只对确认支持该参数的服务商开启——未知端点/自定义端点传未知参数可能直接 400，
+  // 预置服务商确认支持该参数，直接开启；自托管端点（LM Studio/vLLM/Ollama 等）
+  // 同样遵循 OpenAI 语义、需要显式开启，否则流式永远拿不到 usage（token 恒 0）——
+  // 由 streamChat 带 includeUsage 发送，端点对未知参数报 400/422 时降级重试一次。
   // Anthropic 格式自带 usage（message_start / message_delta），无需此参数。
-  if (stream && m.apiFormat !== 'anthropic' && STREAM_USAGE_PROVIDERS[m.provider || m.id]) {
-    body.stream_options = { include_usage: true };
+  if (stream && m.apiFormat !== 'anthropic') {
+    if (STREAM_USAGE_PROVIDERS[m.provider || m.id] || includeUsage) {
+      body.stream_options = { include_usage: true };
+    }
   }
   if (searchOn) {
     if (m.provider === 'dashscope') body.enable_search = true;           // 阿里百炼原生搜索
@@ -268,17 +272,28 @@ async function streamChat(m, messages, opts) {
   };
   try {
     let res;
+    // 自托管端点先带 stream_options 试（拿流式 usage）；被 400/422 拒绝说明端点不认
+    // 该参数，去掉后重试一次。预置服务商确认支持，不走降级
+    const presetUsage = !!STREAM_USAGE_PROVIDERS[m.provider || m.id];
+    const tryUsage = !presetUsage && m.apiFormat !== 'anthropic';
+    const doFetch = (withUsage) => fetch(chatEndpoint(m), {
+      method: 'POST',
+      headers: authHeaders(m),
+      body: JSON.stringify(buildBody(m, messages, { stream: true, searchOn, includeUsage: withUsage })),
+      signal: ctrl.signal
+    });
+    const netErr = e => {
+      if (abortedByTimeout) return new Error('连接超时：服务器 120 秒未响应');
+      if (signal && signal.aborted) return new Error('已停止');
+      return new Error('网络请求失败：' + (e.cause && e.cause.message || e.message));
+    };
     try {
-      res = await fetch(chatEndpoint(m), {
-        method: 'POST',
-        headers: authHeaders(m),
-        body: JSON.stringify(buildBody(m, messages, { stream: true, searchOn })),
-        signal: ctrl.signal
-      });
+      res = await doFetch(tryUsage);
     } catch (e) {
-      if (abortedByTimeout) throw new Error('连接超时：服务器 120 秒未响应');
-      if (signal && signal.aborted) throw new Error('已停止');
-      throw new Error('网络请求失败：' + (e.cause && e.cause.message || e.message));
+      throw netErr(e);
+    }
+    if (!res.ok && tryUsage && (res.status === 400 || res.status === 422)) {
+      try { res = await doFetch(false); } catch (e) { throw netErr(e); }
     }
     bumpIdle();
     if (!res.ok) throw new Error(await readError(res));

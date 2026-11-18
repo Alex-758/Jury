@@ -103,12 +103,53 @@ async function run() {
   const dsOk = captured && captured.max_tokens === 100 && !('max_completion_tokens' in captured);
   check('max_completion_tokens 选择正确', kimiOk && gptOk && dsOk, JSON.stringify({ kimiOk, gptOk, dsOk }));
 
-  // 8) 自定义端点（provider=custom）不应带 stream_options
+  // 8) 自托管端点（provider=custom）默认带 stream_options.include_usage：
+  //    LM Studio/vLLM/Ollama 等遵循 OpenAI 语义，不显式开启流式永远拿不到 usage（token 恒 0）
   captured = null;
   await providers.streamChat(Object.assign(model(base), { provider: 'custom', id: 'idcustom' }),
     [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
-  check('自定义端点不带 stream_options', captured && !('stream_options' in captured),
+  check('自托管端点带 stream_options.include_usage（流式 usage 采集）',
+    captured && captured.stream_options && captured.stream_options.include_usage === true,
     JSON.stringify(captured));
+
+  // 8b) 严格端点拒绝该参数（400）：自动去掉 stream_options 降级重试一次并成功，usage 照收
+  let reqCount = 0, sawOptions = false;
+  handler = (req, res) => {
+    reqCount++;
+    let b = '';
+    req.on('data', c => { b += c; });
+    req.on('end', () => {
+      const j = JSON.parse(b || '{}');
+      if ('stream_options' in j) {
+        sawOptions = true;
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: { message: 'unknown field: stream_options' } }));
+        return;
+      }
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.write('data: {"choices":[{"delta":{"content":"行"}}]}\n\n');
+      res.write('data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+  };
+  out = await providers.streamChat(Object.assign(model(base), { provider: 'custom' }),
+    [{ role: 'user', content: 'hi' }], { onEvent: () => {} });
+  check('端点拒绝 stream_options 时降级重试成功（usage 照收）',
+    reqCount === 2 && sawOptions && out.content === '行' && out.usage && out.usage.input === 3 && out.usage.output === 2,
+    JSON.stringify({ reqCount, sawOptions, usage: out.usage }));
+
+  // 8c) 两次都 400（错误与参数无关）：报第二次的错误，不无限重试
+  handler = (req, res) => {
+    reqCount++;
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: { message: 'model not found' } }));
+  };
+  err = null;
+  try { await providers.streamChat(Object.assign(model(base), { provider: 'custom' }), [{ role: 'user', content: 'hi' }], { onEvent: () => {} }); }
+  catch (e) { err = e; }
+  check('降级重试后仍失败按原错误报出（只重试一次）',
+    !!err && /model not found/.test(err.message) && reqCount === 4,
+    'reqCount=' + reqCount + ' err=' + (err && err.message));
 
   // 9) SSE 错误帧（one-api 类网关转发上游失败）：必须报错，不能返回"✓ 完成"的空回答
   handler = (req, res) => {

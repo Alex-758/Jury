@@ -327,8 +327,8 @@ ipcMain.handle('chat:send', (e, payload) => {
           });
           send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
         } catch (err) {
-          // 已停止的回答也会带出已产生的 token 用量
-          send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
+          // 已停止的回答也会带出已产生的 token 用量；ms 让"已停止"卡片能显示已耗时多久
+          send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null, ms: Date.now() - t0 });
         }
       });
       await Promise.allSettled(jobs);

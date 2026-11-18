@@ -280,7 +280,9 @@ server.listen(0, '127.0.0.1', () => {
       const body = requests[0].body;
       assert(body.messages[0].role === 'system' && body.messages[0].content === '全局提示词SYS', JSON.stringify(body.messages[0]));
       assert(body.stream === true && body.max_tokens === 4096 && !('max_completion_tokens' in body), JSON.stringify(body));
-      assert(!('stream_options' in body), '自定义端点不应带 stream_options');
+      // 自托管端点也带 stream_options.include_usage（LM Studio/vLLM 等需显式开启才有流式
+      // usage；端点拒绝时主进程会降级重试，契约测试只看请求体形状）
+      assert(body.stream_options && body.stream_options.include_usage === true, '自定义端点缺少 stream_options: ' + JSON.stringify(body.stream_options));
       return JSON.stringify({ texts: t.texts, tok: t.tok });
     });
 

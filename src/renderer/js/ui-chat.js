@@ -634,8 +634,16 @@ window.MM = window.MM || {};
       else if (res.finish === 'content_filter') h += '<span class="badge err" title="回答被内容安全策略拦截，可能不完整">内容被拦截</span>';
       return h + usageBadge(res.usage, { modelId: res.modelId });
     }
-    if (res.status === 'error') return '<span class="badge err">✗ 失败</span>' + usageBadge(res.usage, { modelId: res.modelId });
-    if (res.status === 'stopped') return '<span class="badge muted">⏹ 已停止</span>' + usageBadge(res.usage, { modelId: res.modelId });
+    if (res.status === 'error') {
+      const ms = num(res.ms);
+      return '<span class="badge err">✗ 失败</span>' + (ms > 0 ? '<span class="badge">' + U.fmtMs(ms) + '</span>' : '') +
+        usageBadge(res.usage, { modelId: res.modelId });
+    }
+    if (res.status === 'stopped') {
+      const ms = num(res.ms);
+      return '<span class="badge muted">⏹ 已停止</span>' + (ms > 0 ? '<span class="badge">' + U.fmtMs(ms) + '</span>' : '') +
+        usageBadge(res.usage, { modelId: res.modelId });
+    }
     if (res.status === 'skipped') return '<span class="badge muted" title="' + U.esc(res.error || '') + '">⏭ 已跳过</span>';
     return '';
   }
@@ -1774,6 +1782,7 @@ window.MM = window.MM || {};
     } else if (ev.type === 'error') {
       if (/已停止/.test(ev.message)) { res.status = 'stopped'; res.content = res.content || ''; }
       else { res.status = 'error'; res.error = ev.message; }
+      res.ms = ev.ms || 0; // 已停止/失败也要显示已耗时多久（与成功卡同款徽标）
       // 已停止的回答也可能带出部分用量，一起存下来
       if (ev.usage) res.usage = ev.usage;
       body.classList.remove('streaming');
