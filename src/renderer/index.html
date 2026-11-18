@@ -142,6 +142,12 @@
   <script src="js/ui-sessions.js"></script>
   <script src="js/ui-settings.js"></script>
   <script src="js/ui-usage.js"></script>
+  <!-- 聊天流拆分（共享全局词法作用域，经典脚本顶层声明跨文件可见）：core → attach → render → flow → export → 装配 -->
+  <script src="js/chat-core.js"></script>
+  <script src="js/chat-attach.js"></script>
+  <script src="js/chat-render.js"></script>
+  <script src="js/chat-flow.js"></script>
+  <script src="js/chat-export.js"></script>
   <script src="js/ui-chat.js"></script>
   <script src="js/app.js"></script>
 </body>
