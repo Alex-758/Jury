@@ -4,10 +4,18 @@ dist/
 *.log
 
 # 运行时数据（含 API Key，绝不入库）
+# 旧单文件布局
 store.json
 store.json.bak
 store.json.corrupt-*
+store.json.auto-*
+store.json.legacy-*
+# 分文件布局（1.5.1+）：根锚定，避免误伤源码目录
+/config.json
+/sessions/
+/backups/
 catalog.json
+window-state.json
 *.local.json
 
 # 编辑器/系统
