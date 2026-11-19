@@ -349,20 +349,28 @@ ipcMain.handle('chat:synthesize', (e, payload) => {
   const ac = new AbortController();
   activeRequests.set(requestId, ac);
   (async () => {
-    const em = makeEmitter(requestId, '__merge__');
-    const send = em.send;
-    send({ type: 'start' });
-    const t0 = Date.now();
     try {
-      const { content, usage, finish } = await providers.streamChat(resolveModel(model), messages, {
-        searchOn: false, signal: ac.signal, onEvent: send
-      });
-      send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
+      const em = makeEmitter(requestId, '__merge__');
+      const send = em.send;
+      send({ type: 'start' });
+      const t0 = Date.now();
+      try {
+        const { content, usage, finish } = await providers.streamChat(resolveModel(model), messages, {
+          searchOn: false, signal: ac.signal, onEvent: send
+        });
+        send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
+      } catch (err) {
+        send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
+      }
     } catch (err) {
-      send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
+      // 起始段（makeEmitter / start 事件）抛错也必须收尾：否则 activeRequests 泄漏、
+      // 渲染层永远收不到 all-done，界面卡在「生成中」且拿不到任何错误提示
+      console.error('[chat:synthesize] 起始阶段失败：', err);
+      try { emit({ requestId, modelId: '__merge__', type: 'error', message: (err && err.message) || String(err), usage: null }); } catch (e2) { /* 窗口已销毁 */ }
+    } finally {
+      activeRequests.delete(requestId);
+      emit({ requestId, modelId: null, type: 'all-done' });
     }
-    activeRequests.delete(requestId);
-    emit({ requestId, modelId: null, type: 'all-done' });
   })();
   return true;
 });
@@ -650,8 +658,10 @@ app.whenReady().then(() => {
   const loaded = store.load();
   if (loaded) db = { config: loaded.config || {}, sessions: loaded.sessions || [] };
   const bad = store.corruptInfo();
-  if (bad) {
-    const lines = bad.items.map(it =>
+  // 只提示本次新隔离的文件：历史遗留的坏文件（已备份过、用户已被告知）不再每次启动重复弹窗
+  const freshBad = bad ? { items: bad.items.filter(it => it.isNew !== false) } : null;
+  if (freshBad && freshBad.items.length) {
+    const lines = freshBad.items.map(it =>
       '· ' + it.file + '\n  ' + (it.backup ? '已隔离备份为 ' + it.backup : '（隔离备份失败，请手动备份）') + '\n  ' + it.message
     ).join('\n');
     dialog.showMessageBox({

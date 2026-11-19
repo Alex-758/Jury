@@ -26,6 +26,7 @@ let dataDir = null;
 const mtimes = new Map();      // 文件路径 -> 本进程最后已知的 mtimeMs
 const sessionCache = new Map(); // sessionId -> 上次写盘的 JSON 字符串（差量比对基准）
 const fileIds = new Map();     // sessionId -> 会话文件名（含净化/防碰撞）
+const usedNames = new Set();   // 已占用的文件名（小写）：Windows 文件系统大小写不敏感
 let cfgPlain = null;           // 上次写盘的 config 明文串（差量基准；DPAPI 密文非确定，密文串比对永不命中）
 let idxCache = null;           // 上次写盘的 index.json 内容
 let corrupts = [];             // 本次加载中隔离的损坏文件 [{file, backup, message}]
@@ -109,12 +110,29 @@ function readJson(f) {
   catch (e) { return { error: e.message }; }
 }
 
-// 解析失败的文件：留现场备份，绝不覆盖
+// 解析失败的文件：留现场备份，绝不覆盖（原文件保持原样，用户可就地检查/恢复）。
+// 但同一个坏文件每次启动都会解析失败：若无条件再复制一份 .corrupt，会随启动次数
+// 无限堆积，且每次都弹「数据损坏」——用户已被告知过就不再重复打扰。
+// 判据：同目录下已有该文件的 .corrupt-<时间戳> 备份 → 只记录、不再复制也不必再报。
 function quarantine(f, message) {
+  const dir = path.dirname(f);
+  const base = path.basename(f);
+  let already = '';
+  try {
+    already = fs.readdirSync(dir).find(n => n.indexOf(base + '.corrupt-') === 0) || '';
+  } catch (e) { /* 目录不可读：按未隔离处理 */ }
+  if (already) {
+    // 历史遗留的坏文件：仍登记（主进程据此跳过图片 gc，避免把可恢复数据的图片删掉），
+    // 但 isNew=false 让启动弹窗不再每次重复打扰
+    const item = { file: f, backup: path.join(dir, already), message: message, isNew: false };
+    corrupts.push(item);
+    console.warn('[store] 数据文件仍无法解析（已有隔离备份，跳过重复复制）：' + f + '：' + message);
+    return item;
+  }
   const backup = f + '.corrupt-' + Date.now();
-  let saved = backup;
-  try { fs.copyFileSync(f, backup); } catch (e2) { saved = ''; }
-  const item = { file: f, backup: saved, message: message };
+  let saved = '';
+  try { fs.copyFileSync(f, backup); saved = backup; } catch (e2) { saved = ''; }
+  const item = { file: f, backup: saved, message: message, isNew: true };
   corrupts.push(item);
   console.warn('[store] 数据文件解析失败，已隔离备份：' + f + ' -> ' + (saved || '（备份失败）') + '：' + message);
   return item;
@@ -178,21 +196,27 @@ function snapshot(tag) {
 
 // ---------- 会话文件名 ----------
 // id 来自渲染层 U.uid()（字母数字），但导入/手改数据不作此假设：
-// 净化成安全文件名；净化有损时补全量短哈希定位（哈希含完整 id，实际不再撞名）。
+// 净化成安全文件名；有损净化/保留名/重名时补全量短哈希定位（哈希含完整 id）。
 // 映射确定性强：save → load → save 走同一函数得到同一文件名
 function hash36(s) {
   let h = 5381;
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
   return (h >>> 0).toString(36);
 }
+// 保留名：index 是索引文件本身；con/prn/aux/nul/com1-9/lpt1-9 在 Windows 上是设备名
+//（带扩展名同样无效，例如 nul.txt），这些名字一律补哈希，避免写盘失败或落到设备上。
+const RESERVED = /^(index|con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
 function fileIdOf(id) {
   if (fileIds.has(id)) return fileIds.get(id);
   const key = String(id);
   let name = key.replace(/[^\w.-]/g, '_').slice(0, 80);
-  if (name !== key || !name) name = name.slice(0, 80) + '-' + hash36(key);
-  for (const [other, n] of fileIds) { // 名字被其他 id 占用：同样补哈希区分
-    if (n === name) { name = name.slice(0, 80) + '-' + hash36(key); break; }
+  // 有损净化、空名、保留名，或者名字（不分大小写）已被占用 → 补哈希
+  if (name !== key || !name || RESERVED.test(name) || usedNames.has(name.toLowerCase())) {
+    name = name.slice(0, 80) + '-' + hash36(key);
   }
+  // 补哈希后仍可能撞上（两个不同 id 哈希相同/名字相同）：再追加长度兜底
+  while (usedNames.has(name.toLowerCase())) name = name.slice(0, 74) + '-' + hash36(key + '#' + usedNames.size);
+  usedNames.add(name.toLowerCase());
   fileIds.set(id, name);
   return name;
 }
@@ -204,7 +228,11 @@ function sessionFile(id) { return path.join(sessionsDir(), fileIdOf(id) + '.json
 // 与损坏场景一致——此时任何自动处理都可能扩大损失，交给用户恢复备份。
 function migrateLegacy() {
   const legacy = path.join(dataDir, 'store.json');
-  if (!fs.existsSync(legacy) || fs.existsSync(sessionsDir())) return true;
+  if (!fs.existsSync(legacy)) return true;
+  // 「迁移已完成」的唯一判据是 index.json（提交点：它在所有会话写完之后才写）。
+  // 不能只看 sessions/ 目录是否存在——迁移中途失败时目录已被创建，那样下次启动
+  // 会误判为已完成并静默跳过旧数据（store.json 还在，却永远不再被读取）。
+  if (fs.existsSync(indexFile())) return true;
   const r = readJson(legacy);
   if (r.missing) return true;
   if (r.error || !r.data || typeof r.data !== 'object') {
@@ -215,8 +243,9 @@ function migrateLegacy() {
   const sessions = Array.isArray(data.sessions) ? data.sessions.filter(s => s && typeof s === 'object' && s.id) : [];
   try {
     fs.mkdirSync(sessionsDir(), { recursive: true });
-    // 写盘顺序即提交顺序：config（密钥）最先，旧文件改名（commit 点）最后——
-    // 中途断电最坏留下"新文件 + 未改名的旧 store.json"，数据两处都找得回来
+    // 写盘顺序即提交顺序：config（密钥）最先，index.json（提交点）最后——
+    // 中途断电最坏留下"新文件 + 未改名的旧 store.json"，数据两处都找得回来；
+    // 且 index.json 未写成时下次启动会重做迁移（守卫看 index.json）
     const cfgStr = JSON.stringify({ config: encryptConfig(data.config || {}) });
     writeAtomic(configFile(), cfgStr);
     cfgPlain = JSON.stringify(data.config || {});
@@ -232,12 +261,12 @@ function migrateLegacy() {
     idxCache = idx;
     // 旧文件留档不删（复制不删除惯例），旧版 auto/bak 备份也原样保留
     const keep = legacy + '.legacy-' + Date.now();
-    try { fs.renameSync(legacy, keep); } catch (e) { /* 改名失败不影响：sessions/ 已存在，下次启动走正常加载 */ }
+    try { fs.renameSync(legacy, keep); } catch (e) { /* 改名失败不影响：index.json 已写，下次启动走正常加载 */ }
     console.log('[store] 旧版 store.json 已拆分为分文件布局，原文件留档为 ' + path.basename(keep));
     return true;
   } catch (e) {
     // 拆分写盘失败（磁盘满/无权限等）：不能静默当空库启动——记进 corrupts 让主进程
-    // 弹窗提示，旧文件原样保留，下次启动重试拆分
+    // 弹窗提示，旧文件原样保留，下次启动重试拆分（index.json 未写成，守卫不会误判）
     corrupts.push({ file: legacy, backup: '', message: '旧版数据拆分写盘失败：' + (e && e.message) });
     console.warn('[store] 旧版数据拆分失败：', e && e.message);
     return false;
@@ -250,11 +279,22 @@ function load() {
   decryptFailures = 0;
   sessionCache.clear();
   fileIds.clear();
+  usedNames.clear();
   mtimes.clear();
   cfgPlain = null;
   idxCache = null;
 
-  if (!migrateLegacy()) return null; // 旧文件损坏：整库空启动（语义与旧方案一致）
+  if (!migrateLegacy()) {
+    // 迁移失败：本次以空库启动（主进程已弹窗），但必须清掉迁移过程中建立的
+    // 「磁盘已知内容」基准——否则渲染层拿到空数据后的首次保存会把刚写成功的
+    // 会话文件当成"已删除"逐个 unlink，把本可重试恢复的数据真的删掉。
+    // 这些残留文件下次启动会走"未登记会话文件"补录逻辑被收回。
+    sessionCache.clear();
+    fileIds.clear();
+    usedNames.clear();
+    mtimes.clear();
+    return null; // 旧文件损坏/写盘失败：整库空启动（语义与旧方案一致）
+  }
 
   const hasConfig = fs.existsSync(configFile());
   const hasSessions = fs.existsSync(sessionsDir());
@@ -402,6 +442,9 @@ function save(data) {
     const f = sessionFile(id);
     try { fs.unlinkSync(f); } catch (e) { /* 文件本就不存在：忽略 */ }
     sessionCache.delete(id);
+    // 同时释放文件名占用：否则删掉的 id 名字永远不可复用（长会话反复增删会累积占位）
+    const name = fileIds.get(id);
+    if (name) usedNames.delete(name.toLowerCase());
     fileIds.delete(id);
     mtimes.delete(f);
     written++;

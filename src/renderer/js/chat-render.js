@@ -715,14 +715,19 @@
       ',' + (r.sources ? r.sources.length : 0) + ',' + (r.usage && (r.usage.input || r.usage.output) ? 1 : 0) +
       ',' + (r.error ? 1 : 0) + ',' + (r.ms || 0)
     ).join(';');
-    const mg = am.merge ? am.merge.content.length + ',' + am.merge.mode + ',' + (am.merge.usage ? 1 : 0) : '-';
+    // content/mode 一律按空值兜底：导入或旧版本固化的 merge 可能只有 usage 没有 content，
+    // 直接读 .length 会抛 TypeError 让 renderAll 整页失败（启动即错误遮罩）
+    const mg = am.merge
+      ? (am.merge.content || '').length + ',' + (am.merge.mode || '') + ',' + (am.merge.usage ? 1 : 0)
+      : '-';
     // 交叉审查状态也要进签名：审查完成/失败会变卡内容，池里旧节点必须失效重建。
     // 活跃份 + 份数/指针一起进签名：切换历史或新增审查时同样触发重建
     const rvA = activeReviewOf(am);
     const rv = rvA
-      ? (rvA.items || []).map(i => (i.status || '') + ':' + (i.content || '').length).join(';') +
+      ? (rvA.items || []).map(i => ((i && i.status) || '') + ':' + ((i && i.content) || '').length).join(';') +
         '|' + (rvA.verdict
-          ? rvA.verdict.content.length + (rvA.verdict.usage ? 'u' : '') + (rvA.verdict.stopped ? 's' : '')
+          // verdict.content 同理可为空（仲裁占位已建、正文未到就被中断）
+          ? ((rvA.verdict.content || '').length + (rvA.verdict.usage ? 'u' : '') + (rvA.verdict.stopped ? 's' : ''))
           : '-') + (rvA.stopped ? 'S' : '')
       : '';
     return 'A:' + u + '|' + am.active + ',' + ((am.versions || []).length) + '|' + rs + '|' + mg + '|' + rv +
