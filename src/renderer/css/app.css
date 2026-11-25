@@ -193,12 +193,13 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); }
   animation: livePulse 1.4s ease-in-out infinite;
 }
 @keyframes livePulse { 50% { opacity: .25; } }
-.s-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; opacity: .4; transition: opacity .15s; }
-.session-item:hover .s-actions { opacity: 1; }
+/* 操作项常显：此前默认 opacity:.4 在暖沙/奶油底上对比度过低（几乎看不清），
+   改为常显的次级文字（色值取 --text-2，比时间戳略深，保证选中行上可读）；悬停仍有底色与加深反馈 */
+.s-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
 .s-actions button {
   display: inline-flex; align-items: center; justify-content: center;
   height: 22px; padding: 0 5px; border-radius: 5px;
-  font-size: 11px; color: var(--muted); white-space: nowrap;
+  font-size: 11px; color: var(--text-2); white-space: nowrap;
 }
 .s-actions button:hover { background: var(--border); color: var(--text); }
 .s-actions button.del:hover { color: var(--danger); }
@@ -471,7 +472,7 @@ details.sources[open] > :not(summary), details.reasoning[open] > :not(summary) {
 .rv-findings { display: flex; flex-direction: column; gap: 10px; }
 .rv-item { border: 1px solid var(--panel-3); border-radius: 8px; padding: 8px 12px; }
 .rv-item-head { display: flex; align-items: center; gap: 7px; margin-bottom: 4px; }
-.rv-item-name { font-size: 12.5px; font-weight: 600; color: var(--text-2); }
+.rv-item-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 600; color: var(--text-2); }
 .rv-item-head .ac-status { font-size: 12px; color: var(--muted); }
 .rv-item-body { font-size: 13px; line-height: 1.7; word-break: break-word; }
 .rv-item-body.streaming, .rv-verdict-body.streaming { white-space: pre-wrap; }

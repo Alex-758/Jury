@@ -96,10 +96,11 @@
           scrollBottom(true);
         }
         searchPhase++;
-        curSearchId = nextReqId('sr');
+        const searchId = nextReqId('sr');
+        curSearchId = searchId;
         curSearchSessionId = s.id;
         try {
-          searchResults = await api.search(userMsg.content, 6, curSearchId);
+          searchResults = await api.search(userMsg.content, 6, searchId);
           if (!searchResults) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
         } catch (e) {
           // 被停止（chat:stop 经 activeRequests 中止）或已开新一轮：属预期，静默；
@@ -112,8 +113,11 @@
           }
         } finally {
           searchPhase--;
-          curSearchId = null;
-          curSearchSessionId = null;
+          // 旧搜索可能在新搜索已登记后才结束，只有仍指向本次 ID 才能清理全局句柄。
+          if (curSearchId === searchId) {
+            curSearchId = null;
+            curSearchSessionId = null;
+          }
         }
         if (searchResults && searchResults.length) userMsg.sources = searchResults;
       }
@@ -880,6 +884,7 @@
       const rBadge = { cost: reviewCost(review) };
       if (!review.verdict && review.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
       else if (review.verdict && review.verdict.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
+      else if (review.verdict && review.verdict.failed) rStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u, rBadge);
       else if (review.verdict) rStatus.innerHTML = '✓ 完成' + usageBadge(u, rBadge);
       else rStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u, rBadge);
     }
@@ -1096,9 +1101,9 @@
         v.content += ev.text;
         if (refs) scheduleStreamPaint(refs.body, function () { paintStreamText(refs.body, v.content); });
       }
-      else if (ev.type === 'done' && ev.usage) {
-        v.usage = ev.usage; v.ms = ev.ms || 0;
-        if (refs) refs.status.innerHTML = '✓'; // 仲裁块的 status 在此落终态，否则 spinner 永转
+      else if (ev.type === 'done') {
+        v.usage = ev.usage || null; v.ms = ev.ms || 0;
+        if (refs) refs.status.innerHTML = '✓'; // 即使端点不回 usage，仲裁块也必须落终态
       }
       else if (ev.type === 'error') {
         if (/已停止/.test(ev.message || '')) {
@@ -1108,6 +1113,7 @@
           if (refs) refs.status.innerHTML = '<span class="badge muted">⏹</span>';
         } else {
           ctx.verdictFailed = true;
+          v.failed = true;
           v.content += '\n\n（仲裁失败：' + ev.message + '）';
           if (refs) refs.status.innerHTML = '<span style="color:var(--danger)">✗</span>';
         }

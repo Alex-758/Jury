@@ -2,6 +2,9 @@
 // 统一的模型客户端：兼容 OpenAI Chat Completions 与 Anthropic Messages 两种 API 格式
 // 支持流式(SSE)输出、reasoning 思考链、原生联网搜索开关、图片输入、模型列表、连通性测试
 const images = require('./images');
+const APP_VERSION = require('../../package.json').version;
+
+const MAX_RESPONSE_CHARS = 10 * 1024 * 1024;
 
 function normalizeBase(url) { return (url || '').trim().replace(/\/+$/, ''); }
 
@@ -35,7 +38,7 @@ function modelsEndpoint(m) {
 }
 
 function authHeaders(m) {
-  const h = { 'Content-Type': 'application/json', 'User-Agent': 'Jury/1.0' };
+  const h = { 'Content-Type': 'application/json', 'User-Agent': 'Jury/' + APP_VERSION };
   const key = (m.apiKey || '').trim();
   if (m.apiFormat === 'anthropic') {
     h['x-api-key'] = key;
@@ -144,15 +147,21 @@ async function readError(res) {
 // 带上限地读完响应体：JSON Content-Type 路径用。异常端点忽略 stream:true
 // 返回超大 JSON 时，一次性 res.text() 会把主进程内存吃穿，这里读超即断
 async function readTextCapped(res, max) {
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const text = await res.text();
+    return { text: text.slice(0, max), truncated: new TextEncoder().encode(text).byteLength > max };
+  }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let out = '';
+  let bytes = 0;
   let truncated = false;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
+    bytes += value.byteLength;
     out += dec.decode(value, { stream: true });
-    if (out.length > max) {
+    if (bytes > max) {
       truncated = true;
       try { Promise.resolve(reader.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
       break;
@@ -294,7 +303,13 @@ async function streamChat(m, messages, opts) {
     }
     if (!res.ok && tryUsage && (res.status === 400 || res.status === 422)) {
       // 丢弃被拒响应前必须先清空/取消响应体：未读的 body 会让 undici 连接滞留在池里
-      try { await res.text(); } catch (e) { try { Promise.resolve(res.body.cancel()).catch(function () {}); } catch (e2) { /* 已断 */ } }
+      try {
+        const dropped = await readTextCapped(res, MAX_RESPONSE_CHARS);
+        if (dropped.truncated) throw new Error('服务端响应超过 10MB，已中止解析');
+      } catch (e) {
+        try { Promise.resolve(res.body && res.body.cancel()).catch(function () {}); } catch (e2) { /* 已断 */ }
+        if (e && /超过 10MB/.test(e.message || '')) throw e;
+      }
       try { res = await doFetch(false); } catch (e) { throw netErr(e); }
     }
     bumpIdle();
@@ -378,7 +393,7 @@ async function streamChat(m, messages, opts) {
     // 响应体读取设与流式回退相同的 10MB 上限：异常端点返回超大 JSON 时不能无限吃内存
     const ctype = String(res.headers.get('content-type') || '').toLowerCase();
     if (ctype.indexOf('json') >= 0 && ctype.indexOf('event-stream') < 0) {
-      const body = await readTextCapped(res, 10 * 1024 * 1024);
+      const body = await readTextCapped(res, MAX_RESPONSE_CHARS);
       if (body.truncated) throw new Error('服务端响应超过 10MB，已中止解析');
       const text = body.text;
       let full = null;
@@ -422,10 +437,10 @@ async function streamChat(m, messages, opts) {
       const text = dec.decode(value, { stream: true });
       buf += text;
       // 单行缓冲同样设上限：异常端点持续发数据但永不出换行时不能无限吃内存
-      if (buf.length > 10 * 1024 * 1024) throw new Error('服务端响应异常：单帧数据超过 10MB，已中止');
+      if (buf.length > MAX_RESPONSE_CHARS) throw new Error('服务端响应异常：单帧数据超过 10MB，已中止');
       // 回退解析缓冲设上限：异常端点一直不发 data: 行时不能无限吃内存
       //（正常聊天 JSON 远小于 10MB；超限后按截断文本走既有的解析失败路径）
-      if (!sawData && rawText.length < 10 * 1024 * 1024) rawText += text;
+      if (!sawData && rawText.length < MAX_RESPONSE_CHARS) rawText += text;
       else if (!sawData) rawTruncated = true;
       let idx;
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -515,7 +530,9 @@ async function chatOnce(m) {
         err.status = res.status;
         throw err;
       }
-      const rawBody = await res.text();
+      const responseBody = await readTextCapped(res, MAX_RESPONSE_CHARS);
+      if (responseBody.truncated) throw new Error('服务端响应超过 10MB，已中止解析');
+      const rawBody = responseBody.text;
       let j;
       try { j = JSON.parse(rawBody); }
       catch (e2) {
@@ -553,7 +570,9 @@ async function chatOnce(m) {
 
 async function readDetail(res) {
   try {
-    const t = await res.text();
+    const body = await readTextCapped(res, MAX_RESPONSE_CHARS);
+    if (body.truncated) return '服务端响应超过 10MB';
+    const t = body.text;
     try {
       const j = JSON.parse(t);
       return String((j.error && (j.error.message || j.error.msg)) || j.message || t).slice(0, 160);
@@ -574,7 +593,11 @@ async function listModels(m) {
       throw new Error('网络请求失败：' + ((e.cause && e.cause.message) || e.message));
     }
     if (!res.ok) throw new Error(await readError(res));
-    const j = await res.json();
+    const body = await readTextCapped(res, MAX_RESPONSE_CHARS);
+    if (body.truncated) throw new Error('服务端响应超过 10MB，已中止解析');
+    let j;
+    try { j = JSON.parse(body.text); }
+    catch (e) { throw new Error('模型列表响应不是有效 JSON'); }
     const arr = Array.isArray(j.data) ? j.data : (Array.isArray(j.models) ? j.models : []);
     // Gemini OpenAI 兼容层的 /models 返回形如 models/gemini-xxx 的 id：
     // 不剥前缀会被选中后原样发给 chat 端点导致 404
@@ -583,7 +606,7 @@ async function listModels(m) {
     const out = [];
     for (const x of arr) {
       if (!x || typeof x !== 'object') continue; // 网关可能在列表里混入 null：不能拖垮整个列表
-      let id = x.id || x.name;
+      let id = typeof x.id === 'string' ? x.id : (typeof x.name === 'string' ? x.name : '');
       if (stripModelsPrefix && /^models\//.test(id)) id = id.slice('models/'.length);
       if (!id || seen.has(id)) continue;
       seen.add(id);
@@ -592,7 +615,7 @@ async function listModels(m) {
       else if (x.max_context_length) item.context = x.max_context_length;
       else if (x.context_window) item.context = x.context_window;
       const mods = x.architecture && x.architecture.input_modalities;
-      if (mods && mods.length) item.multimodal = mods.indexOf('image') >= 0;
+      if (Array.isArray(mods) && mods.length) item.multimodal = mods.indexOf('image') >= 0;
       out.push(item);
     }
     out.sort((a, b) => (a.id < b.id ? -1 : 1));

@@ -3,6 +3,36 @@
 // opts.signal：外部中止（chat:stop 经 activeRequests 传入）——用户点停止时
 // 搜索请求立即中断，不再在主进程空跑到 15s 超时
 const BING_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const MAX_SEARCH_RESPONSE_CHARS = 10 * 1024 * 1024;
+
+async function readTextCapped(res, max) {
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const text = await res.text();
+    if (new TextEncoder().encode(text).byteLength > max) throw new Error('搜索响应超过 10MB，已中止解析');
+    return text;
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let out = '';
+  let bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    out += dec.decode(value, { stream: true });
+    if (bytes > max) {
+      try { Promise.resolve(reader.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
+      throw new Error('搜索响应超过 10MB，已中止解析');
+    }
+  }
+  return out + dec.decode();
+}
+
+async function readJsonCapped(res) {
+  const text = await readTextCapped(res, MAX_SEARCH_RESPONSE_CHARS);
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error('搜索响应不是有效 JSON'); }
+}
 
 // 把外部 signal 接到本次请求的 controller 上；已中止则直接抛"已停止"
 function wireExternal(signal, ctrl) {
@@ -47,7 +77,7 @@ async function bingAttempt(url, count, opts, budgetMs) {
       signal: ctrl.signal
     });
     if (!res.ok) throw new Error('必应搜索 HTTP ' + res.status);
-    const t = await res.text();
+    const t = await readTextCapped(res, MAX_SEARCH_RESPONSE_CHARS);
     const re = /<li class="b_algo"[\s\S]*?<h2[^>]*><a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a><\/h2>[\s\S]*?(?:<p[^>]*>([\s\S]*?)<\/p>)?/g;
     const out = [];
     let m;
@@ -81,8 +111,8 @@ async function webSearch(cfg, query, count = 6, opts) {
         body: JSON.stringify({ query, api_key: key, max_results: count }),
         signal: ctrl.signal
       });
-      if (!res.ok) throw new Error('Tavily ' + res.status + ': ' + (await res.text()).slice(0, 200));
-      const j = await res.json();
+      if (!res.ok) throw new Error('Tavily ' + res.status + ': ' + (await readTextCapped(res, MAX_SEARCH_RESPONSE_CHARS)).slice(0, 200));
+      const j = await readJsonCapped(res);
       return (j.results || []).map(r => ({ title: r.title || '', url: r.url || '', snippet: (r.content || '').slice(0, 300) }));
     }
     if (provider === 'bocha') {
@@ -92,12 +122,12 @@ async function webSearch(cfg, query, count = 6, opts) {
         body: JSON.stringify({ query, count, summary: true }),
         signal: ctrl.signal
       });
-      if (!res.ok) throw new Error('博查 ' + res.status + ': ' + (await res.text()).slice(0, 200));
-      const j = await res.json();
+      if (!res.ok) throw new Error('博查 ' + res.status + ': ' + (await readTextCapped(res, MAX_SEARCH_RESPONSE_CHARS)).slice(0, 200));
+      const j = await readJsonCapped(res);
       const items = (j.data && j.data.webPages && j.data.webPages.value) || [];
       return items.map(r => ({ title: r.name || '', url: r.url || '', snippet: (r.summary || r.snippet || '').slice(0, 300) }));
     }
-    return null;
+    throw new Error('不支持的搜索服务商：' + provider);
   } catch (e) {
     if (opts && opts.signal && opts.signal.aborted) throw new Error('已停止');
     if (e && e.name === 'AbortError') throw new Error('搜索超时：15 秒未响应');

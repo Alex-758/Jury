@@ -259,7 +259,7 @@ async function run() {
   try {
     global.fetch = async () => ({
       ok: true,
-      json: async () => ({ data: [{ id: 'models/gemini-4-argon' }, { id: 'models/gemini-3.8-flash' }] })
+      text: async () => JSON.stringify({ data: [{ id: 'models/gemini-4-argon' }, { id: 'models/gemini-3.8-flash' }] })
     });
     const list = await providers.listModels({ apiFormat: 'openai', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', provider: 'google', modelId: 'x' });
     check('Gemini 模型列表剥 models/ 前缀', list.length === 2 && list[0].id === 'gemini-3.8-flash',
@@ -353,6 +353,22 @@ async function run() {
   try { await search.webSearch({ provider: 'bing' }, '测试', 3, { signal: abortCtrl.signal }); }
   catch (e) { err = e; }
   check('搜索外部中止立即抛"已停止"', !!err && /已停止/.test(err.message), err ? err.message : '未报错');
+
+  // 24b) 未知搜索 provider 应明确报错，不静默返回空结果
+  err = null;
+  try { await search.webSearch({ provider: 'unknown-search', apiKey: 'test-key' }, '测试', 3); }
+  catch (e) { err = e; }
+  check('未知搜索 provider 明确报错', !!err && /不支持的搜索服务商/.test(err.message), err ? err.message : '未报错');
+
+  // 24c) 搜索成功响应体同样受 10MB 上限保护
+  const savedFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: true, text: async () => 'x'.repeat(11 * 1024 * 1024) });
+    err = null;
+    try { await search.webSearch({ provider: 'bing' }, '测试', 3); }
+    catch (e) { err = e; }
+    check('搜索超大响应体受上限保护', !!err && /10MB/.test(err.message), err ? err.message : '未报错');
+  } finally { global.fetch = savedFetch; }
 
   // 25) 未知 Content-Type 的 JSON 回退：cached 也要透传（与 JSON 路径同口径）
   handler = (req, res) => {
@@ -461,6 +477,34 @@ async function run() {
   try { await providers.streamChat(model(base), [{ role: 'user', content: 'hi' }], { onEvent: () => {} }); }
   catch (e) { err = e; }
   check('超大 JSON 响应体被上限中止', !!err && /10MB/.test(err.message), err ? err.message : '未报错');
+
+  // 33) /models 返回非字符串 id：跳过，避免设置页对 id 调用 toLowerCase 抛错
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ data: [{ id: 123 }, { name: { bad: true } }, { id: 'valid-model' }] }));
+  };
+  const typed = await providers.listModels(Object.assign(model(base), { baseUrl: base }));
+  check('listModels 只接受字符串模型 ID', typed.length === 1 && typed[0].id === 'valid-model', JSON.stringify(typed));
+
+  // 34) 测试连接错误体超过 10MB：截断读取并返回可控错误，不无界占用内存
+  handler = (req, res) => {
+    res.writeHead(401, { 'Content-Type': 'text/plain' });
+    res.end('z'.repeat(11 * 1024 * 1024));
+  };
+  err = null;
+  try { await providers.chatOnce(Object.assign(noTok(base), { provider: 'deepseek', modelId: 'deepseek-flash' })); }
+  catch (e) { err = e; }
+  check('测试连接超大错误体受上限保护', !!err && /10MB/.test(err.message), err ? err.message : '未报错');
+
+  // 35) /models 成功响应超过 10MB：截断读取并停止解析
+  handler = (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end('{"data":[' + 'x'.repeat(11 * 1024 * 1024) + ']}');
+  };
+  err = null;
+  try { await providers.listModels(Object.assign(model(base), { baseUrl: base })); }
+  catch (e) { err = e; }
+  check('/models 超大响应体受上限保护', !!err && /10MB/.test(err.message), err ? err.message : '未报错');
 
   server.close();
   console.log('---SUMMARY---');

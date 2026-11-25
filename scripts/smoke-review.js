@@ -50,7 +50,7 @@ const server = http.createServer((req, res) => {
     } else {
       cnt.answer++;
     }
-    const usage = { prompt_tokens: 100 + cnt[kind === 'verdict' ? 'verdict' : kind] , completion_tokens: 50 };
+    const usage = kind === 'verdict' && process.env.JURY_REVIEW_NO_USAGE ? null : { prompt_tokens: 100 + cnt[kind === 'verdict' ? 'verdict' : kind] , completion_tokens: 50 };
     setTimeout(() => {
       try {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });

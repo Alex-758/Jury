@@ -339,6 +339,31 @@ server.listen(0, '127.0.0.1', () => {
       return JSON.stringify({ mockHits: hit.length, kinds: t.kinds });
     });
 
+    await run('安全：未知 providerId 不能携带渲染层伪造 URL 出站', async () => {
+      const before = requests.length;
+      const t = await js(`(function(){
+        return new Promise(function(resolve){
+          var kinds = [];
+          var off = api.onEvent(function(d){
+            if (!d || d.requestId !== 'sec3') return;
+            if (d.type === 'all-done') { off(); resolve({ ok: true, kinds: kinds }); }
+            else kinds.push(d.type);
+          });
+          api.send({ requestId: 'sec3', targets: [{ model: {
+              id: 'unknown::model', providerId: 'unknown-provider', modelId: 'model', name: 'Unknown',
+              apiFormat: 'openai', baseUrl: 'http://127.0.0.1:${port}/evil', fullUrl: false,
+              maxTokens: 100, contextTokens: 100000 },
+            messages: [{ role: 'user', content: '未知服务商安全测试' }] }], searchOn: false });
+          setTimeout(function(){ off(); resolve({ ok: false, kinds: kinds }); }, 8000);
+        });
+      })()`);
+      assert(t.ok === true, '请求未完成');
+      const hit = requests.slice(before);
+      assert(hit.length === 0, '未知 providerId 仍访问了伪造地址：' + JSON.stringify(hit.map(h => h.url)));
+      assert(t.kinds.indexOf('done') < 0 && t.kinds.indexOf('error') >= 0, JSON.stringify(t.kinds));
+      return JSON.stringify({ mockHits: hit.length, kinds: t.kinds });
+    });
+
     await run('markdown：伪造占位符行不崩溃（越界索引按普通文本输出）', async () => {
       const t = await js(`(function(){
         try {

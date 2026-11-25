@@ -30,6 +30,39 @@ let win = null;
 let db = { config: {}, sessions: [] };
 let conflictNotified = false; // 多实例冲突提示每会话只弹一次
 const activeRequests = new Map(); // requestId -> AbortController
+const MAX_EXTERNAL_RESPONSE_CHARS = 10 * 1024 * 1024;
+
+async function readExternalTextCapped(res) {
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    if (typeof res.text !== 'function') {
+      if (typeof res.json === 'function') return JSON.stringify(await res.json());
+      throw new Error('外部响应无法读取');
+    }
+    const text = await res.text();
+    if (new TextEncoder().encode(text).byteLength > MAX_EXTERNAL_RESPONSE_CHARS) throw new Error('外部响应超过 10MB');
+    return text;
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let text = '', bytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    bytes += value.byteLength;
+    text += dec.decode(value, { stream: true });
+    if (bytes > MAX_EXTERNAL_RESPONSE_CHARS) {
+      try { Promise.resolve(reader.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
+      throw new Error('外部响应超过 10MB');
+    }
+  }
+  return text + dec.decode();
+}
+
+async function readExternalJsonCapped(res) {
+  const text = await readExternalTextCapped(res);
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error('外部响应不是有效 JSON'); }
+}
 
 function emit(payload) {
   if (win && !win.isDestroyed()) win.webContents.send('chat:event', payload);
@@ -232,6 +265,13 @@ function resolveModel(mLike) {
     if (p.apiFormat) full.apiFormat = p.apiFormat;
     if (p.provider) full.provider = p.provider;
     full.fullUrl = !!p.fullUrl;
+  } else {
+    // 未知 providerId 不属于已授权配置，不能把渲染层伪造的 URL 带入网络请求。
+    // 清空端点后由 providers 统一返回网络错误，且不会发生任意出站或泄露密钥。
+    full.baseUrl = '';
+    full.fullUrl = false;
+    full.apiFormat = 'openai';
+    full.provider = '';
   }
   delete full.hasKey;
   return full;
@@ -260,13 +300,20 @@ ipcMain.handle('store:save', (e, data) => {
     delete merged.search.hasKey;
   }
   // 渲染层只改配置时不会带 sessions：保留主进程内存里的会话，不能被空数组覆盖
+  const previousDb = db;
   db = {
     config: merged,
     sessions: Array.isArray(data && data.sessions)
       ? data.sessions
       : (Array.isArray(db.sessions) ? db.sessions : [])
   };
-  const r = store.save(db);
+  let r;
+  try {
+    r = store.save(db);
+  } catch (err) {
+    db = previousDb;
+    throw err;
+  }
   // 多实例冲突：被外部改动过的文件已备份进 backups/bak-<时间戳>/，弹窗提示一次
   if (r && r.conflict && !conflictNotified) {
     conflictNotified = true;
@@ -283,27 +330,35 @@ ipcMain.handle('store:save', (e, data) => {
 ipcMain.handle('secrets:set', (e, { id, key }) => {
   if (!id) return false;
   const k = String(key || '').trim();
+  const previousDb = db;
+  const nextConfig = JSON.parse(JSON.stringify(db.config || {}));
   if (id === 'search') {
-    if (!db.config.search || typeof db.config.search !== 'object') db.config.search = { provider: 'none' };
-    db.config.search.apiKey = k;
+    if (!nextConfig.search || typeof nextConfig.search !== 'object') nextConfig.search = { provider: 'none' };
+    nextConfig.search.apiKey = k;
   } else {
-    const list = Array.isArray(db.config.providers) ? db.config.providers : [];
+    const list = Array.isArray(nextConfig.providers) ? nextConfig.providers : [];
     const p = list.find(x => x && x.id === id);
     if (!p) return false; // 服务商不存在：不要假装写入成功
     p.apiKey = k;
   }
-  store.save(db);
+  db = { config: nextConfig, sessions: previousDb.sessions };
+  try { store.save(db); }
+  catch (err) { db = previousDb; throw err; }
   return true;
 });
 ipcMain.handle('secrets:clear', (e, { id }) => {
+  const previousDb = db;
+  const nextConfig = JSON.parse(JSON.stringify(db.config || {}));
   if (id === 'search') {
-    if (db.config.search && typeof db.config.search === 'object') db.config.search.apiKey = '';
+    if (nextConfig.search && typeof nextConfig.search === 'object') nextConfig.search.apiKey = '';
   } else {
-    const list = Array.isArray(db.config.providers) ? db.config.providers : [];
+    const list = Array.isArray(nextConfig.providers) ? nextConfig.providers : [];
     const p = list.find(x => x && x.id === id);
     if (p) p.apiKey = '';
   }
-  store.save(db);
+  db = { config: nextConfig, sessions: previousDb.sessions };
+  try { store.save(db); }
+  catch (err) { db = previousDb; throw err; }
   return true;
 });
 
@@ -336,8 +391,10 @@ ipcMain.handle('chat:send', (e, payload) => {
       console.error('[chat:send] 请求处理失败：', err);
     } finally {
       // 无论成功/异常都要收尾，否则渲染层会一直停在"生成中"
-      activeRequests.delete(requestId);
-      emit({ requestId, modelId: null, type: 'all-done' });
+      if (activeRequests.get(requestId) === ac) {
+        activeRequests.delete(requestId);
+        emit({ requestId, modelId: null, type: 'all-done' });
+      }
     }
   })();
   return true;
@@ -349,20 +406,30 @@ ipcMain.handle('chat:synthesize', (e, payload) => {
   const ac = new AbortController();
   activeRequests.set(requestId, ac);
   (async () => {
-    const em = makeEmitter(requestId, '__merge__');
-    const send = em.send;
-    send({ type: 'start' });
-    const t0 = Date.now();
     try {
-      const { content, usage, finish } = await providers.streamChat(resolveModel(model), messages, {
-        searchOn: false, signal: ac.signal, onEvent: send
-      });
-      send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
+      const em = makeEmitter(requestId, '__merge__');
+      const send = em.send;
+      send({ type: 'start' });
+      const t0 = Date.now();
+      try {
+        const { content, usage, finish } = await providers.streamChat(resolveModel(model), messages, {
+          searchOn: false, signal: ac.signal, onEvent: send
+        });
+        send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
+      } catch (err) {
+        send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
+      }
     } catch (err) {
-      send({ type: 'error', message: (err && err.message) || String(err), usage: (err && err.usage) || null });
+      // 起始段（makeEmitter / start 事件）抛错也必须收尾：否则 activeRequests 泄漏、
+      // 渲染层永远收不到 all-done，界面卡在「生成中」且拿不到任何错误提示
+      console.error('[chat:synthesize] 起始阶段失败：', err);
+      try { emit({ requestId, modelId: '__merge__', type: 'error', message: (err && err.message) || String(err), usage: null }); } catch (e2) { /* 窗口已销毁 */ }
+    } finally {
+      if (activeRequests.get(requestId) === ac) {
+        activeRequests.delete(requestId);
+        emit({ requestId, modelId: null, type: 'all-done' });
+      }
     }
-    activeRequests.delete(requestId);
-    emit({ requestId, modelId: null, type: 'all-done' });
   })();
   return true;
 });
@@ -394,7 +461,7 @@ ipcMain.handle('catalog:get', async (e, force) => {
     timeout = setTimeout(() => ctrl.abort(), 12000);
     const res = await fetch('https://models.dev/api.json', { signal: ctrl.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    const j = await res.json();
+    const j = await readExternalJsonCapped(res);
     const byId = {};
     const byProvider = {};
     for (const [pid, p] of Object.entries(j)) {
@@ -451,7 +518,7 @@ ipcMain.handle('update:check', async () => {
     });
     if (res.status === 404) throw new Error('仓库还没有发布任何版本');
     if (!res.ok) throw new Error('HTTP ' + res.status);
-    const j = await res.json();
+    const j = await readExternalJsonCapped(res);
     const latest = String(j.tag_name || '').replace(/^v/i, '').trim();
     if (!latest) throw new Error('返回数据缺少版本号');
     const current = app.getVersion();
@@ -536,7 +603,7 @@ ipcMain.handle('search:query', (e, { query, count, requestId }) => {
   let ac = null;
   if (requestId) { ac = new AbortController(); activeRequests.set(requestId, ac); }
   return search.webSearch((db.config && db.config.search) || {}, query, count, { signal: ac && ac.signal })
-    .finally(() => { if (ac) activeRequests.delete(requestId); });
+    .finally(() => { if (ac && activeRequests.get(requestId) === ac) activeRequests.delete(requestId); });
 });
 // 测试搜索：密钥由主进程合并（渲染层只传服务商选择）
 ipcMain.handle('search:test', (e, cfg) => {
@@ -650,8 +717,10 @@ app.whenReady().then(() => {
   const loaded = store.load();
   if (loaded) db = { config: loaded.config || {}, sessions: loaded.sessions || [] };
   const bad = store.corruptInfo();
-  if (bad) {
-    const lines = bad.items.map(it =>
+  // 只提示本次新隔离的文件：历史遗留的坏文件（已备份过、用户已被告知）不再每次启动重复弹窗
+  const freshBad = bad ? { items: bad.items.filter(it => it.isNew !== false) } : null;
+  if (freshBad && freshBad.items.length) {
+    const lines = freshBad.items.map(it =>
       '· ' + it.file + '\n  ' + (it.backup ? '已隔离备份为 ' + it.backup : '（隔离备份失败，请手动备份）') + '\n  ' + it.message
     ).join('\n');
     dialog.showMessageBox({
