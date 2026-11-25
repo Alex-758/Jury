@@ -461,6 +461,36 @@ MM.defaults = {
     for (const s of (Array.isArray(list) ? list : []) ) {
       if (!s || typeof s !== 'object') continue;
       if (!Array.isArray(s.messages)) s.messages = [];
+      // 消息条目可能是 null/字符串（手改或第三方导入）：渲染层逐条读 m.role 会直接抛错，
+      // 而 migrateSessions 只负责折叠/补 id，不该成为唯一防线——这里先滤掉非对象条目
+      else if (s.messages.some(m => !m || typeof m !== 'object')) {
+        s.messages = s.messages.filter(m => m && typeof m === 'object');
+      }
+      // 回答/审查条目里的数组同样来自不可信数据：results / versions[].results /
+      // reviews / reviews[].items 里的 null 会让 roundSig 与渲染逐项抛错，统一滤掉
+      for (const m of s.messages) {
+        if (m.role !== 'assistant') continue;
+        if (Array.isArray(m.results) && m.results.some(x => !x || typeof x !== 'object')) {
+          m.results = m.results.filter(x => x && typeof x === 'object');
+        }
+        if (Array.isArray(m.versions)) {
+          for (const v of m.versions) {
+            if (v && Array.isArray(v.results) && v.results.some(x => !x || typeof x !== 'object')) {
+              v.results = v.results.filter(x => x && typeof x === 'object');
+            }
+          }
+        }
+        if (Array.isArray(m.reviews)) {
+          if (m.reviews.some(x => !x || typeof x !== 'object')) {
+            m.reviews = m.reviews.filter(x => x && typeof x === 'object');
+          }
+          for (const rv of m.reviews) {
+            if (Array.isArray(rv.items) && rv.items.some(x => !x || typeof x !== 'object')) {
+              rv.items = rv.items.filter(x => x && typeof x === 'object');
+            }
+          }
+        }
+      }
       // title 非字符串（手改/外部数据）会让侧栏渲染 appendChild(123) 抛错 → 启动即失败，
       // 与 pinned/createdAt 的兜底同款
       if (typeof s.title !== 'string') s.title = (s.title == null) ? '' : String(s.title);
