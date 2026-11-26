@@ -3,7 +3,7 @@
 Jury 是一个本地运行的 Electron 多模型工作台：一次提问可并行调用多个大模型，比较回答、合并结论，并对结果进行交叉审查与仲裁。
 
 ![平台](https://img.shields.io/badge/platform-Windows-blue)
-![框架](https://img.shields.io/badge/framework-Electron%2044-47848f)
+![框架](https://img.shields.io/badge/framework-Electron_44-47848f.svg)
 ![版本](https://img.shields.io/badge/version-1.5.5-green)
 
 ## 功能
