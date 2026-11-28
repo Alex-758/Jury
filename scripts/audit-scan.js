@@ -373,7 +373,7 @@ app.whenReady().then(async () => {
                tools: !!document.querySelector('.round-tools') };
     })()`);
     check('流式 delta/思考/完成事件正确渲染',
-      st6.text === '你好' && /✓/.test(st6.status) && st6.reasoning && st6.tok && st6.tools,
+      st6.text === '你好' && /完成/.test(st6.status) && st6.reasoning && st6.tok && st6.tools,
       JSON.stringify(st6));
 
     // ---------- T7: 导入新格式备份后，密钥标记是否保留 ----------

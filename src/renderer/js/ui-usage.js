@@ -114,7 +114,7 @@ window.MM = window.MM || {};
         for (const rv of (m.reviews || [])) {
           const rts = rv.createdAt || baseTs;
           for (const it of (rv.items || [])) if (it) pushRow(rows, rts, 'review', title, it);
-          // 仲裁请求也是真实请求；失败仲裁没有 usage 也没有 stopped，归为进行中（数据层无该状态）
+          // 仲裁同样按 status/usage 归类；旧记录无 status 时沿用正文与用量的回退判定。
           if (rv.verdict) pushRow(rows, rts, 'review', title, rv.verdict, '仲裁');
         }
         if (m.prunedTokens) pruned += Number(m.prunedTokens) || 0; // 版本池裁剪折算：只进总量，无法按天/模型拆
@@ -456,7 +456,7 @@ window.MM = window.MM || {};
     if (rows.length > 200) {
       html += '<div class="uu-sub" style="margin-top:8px">仅显示最近 200 条，共 ' + rows.length.toLocaleString() + ' 条；导出 CSV 包含全部。</div>';
     }
-    box.innerHTML = html;
+    box.innerHTML = U.stripEmoji(html);
   }
 
   function csvOf(rows) {
@@ -464,7 +464,7 @@ window.MM = window.MM || {};
     // 是 CSV 注入的标准缓解；数字列（输入/输出/缓存/耗时）跳过前缀，避免负值被变成文本。
     // 含 CR 的值也要引号包裹：否则裸 \r 会断行破坏 CSV 结构
     const escCell = (v, isNum) => {
-      v = String(v == null ? '' : v);
+      v = U.stripEmoji(v);
       if (!isNum && /^[=+\-@\t\r]/.test(v)) v = "'" + v;
       return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
     };

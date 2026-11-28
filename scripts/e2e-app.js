@@ -114,8 +114,11 @@ shell.openExternal = async url => { opened.push(url); };
 const searchMod = require(path.join(ROOT, 'src', 'main', 'search'));
 const originalWebSearch = searchMod.webSearch;
 let mockSearchResults = null;
-searchMod.webSearch = async (cfg, query, count) =>
-  (mockSearchResults && mockSearchResults.length ? mockSearchResults : originalWebSearch(cfg, query, count));
+let searchCalls = 0;
+searchMod.webSearch = async (cfg, query, count) => {
+  searchCalls++;
+  return mockSearchResults && mockSearchResults.length ? mockSearchResults : originalWebSearch(cfg, query, count);
+};
 
 function baseConfig(port) {
   return {
@@ -274,7 +277,7 @@ server.listen(0, '127.0.0.1', () => {
                  users: document.querySelectorAll('.user-msg').length };
       })()`);
       assert(t.texts.length === 2 && /回答-m1-/.test(t.texts[0]) && /回答-m2-/.test(t.texts[1]), JSON.stringify(t));
-      assert(/✓/.test(t.status[0]) && /✓/.test(t.status[1]) && t.tok === 2, JSON.stringify(t));
+      assert(/完成/.test(t.status[0]) && /完成/.test(t.status[1]) && t.tok === 2, JSON.stringify(t));
       assert(t.title === '多模型测试' && t.users === 1, JSON.stringify(t));
       assert(requests.length === 2, '请求数=' + requests.length);
       const body = requests[0].body;
@@ -584,6 +587,7 @@ server.listen(0, '127.0.0.1', () => {
       await setChips(['p3::z1']);
       await js(`(function(){ var t=document.querySelector('#tgl-search'); if(!t.checked){ t.checked=true; t.dispatchEvent(new Event('change',{bubbles:true})); } })()`);
       requests.length = 0;
+      const beforeSearch = searchCalls;
       await sendText('原生搜索测试');
       assert(await waitDone(), '未完成');
       const req = lastReq();
@@ -603,6 +607,7 @@ server.listen(0, '127.0.0.1', () => {
       assert(await waitDone(), '重试未完成');
       const retryReq = lastReq();
       assert(retryReq.body.tools && retryReq.body.tools[0].type === 'web_search', '重试丢失原生搜索：' + JSON.stringify(retryReq.body && retryReq.body.tools));
+      assert(searchCalls === beforeSearch, '纯原生搜索重复调用了通用搜索');
       return JSON.stringify({ tools: req.body.tools[0].type, retryTools: retryReq.body.tools[0].type });
     });
 
@@ -628,7 +633,7 @@ server.listen(0, '127.0.0.1', () => {
       })()`);
       assert(t.has && t.summary.indexOf('搜索来源 (2)') >= 0 && t.links.length === 1 && t.links[0] === 'https://example.com/s' && t.resSources === 2, JSON.stringify(t));
       const req = lastReq();
-      assert(req.body.messages.some(function(m){ return m.role === 'system' && /联网搜索结果/.test(m.content); }), '请求缺少搜索结果注入');
+      assert(req.body.messages.some(function(m){ return m.role === 'system' && /外部联网搜索材料/.test(m.content); }), '请求缺少搜索结果注入');
       await sleep(300);
       const disk = readDisk(DATA);
       const ss = disk.sessions.find(function(x){ return x.title === '搜索来源测试'; });
@@ -636,6 +641,47 @@ server.listen(0, '127.0.0.1', () => {
       mockSearchResults = null;
       await js(`(function(){ var t=document.querySelector('#tgl-search'); if(t.checked){ t.checked=false; t.dispatchEvent(new Event('change',{bubbles:true})); } })()`);
       return JSON.stringify({ summary: t.summary, links: t.links });
+    });
+
+    await run('混合搜索：普通发送、单模型重试和整轮重试保持分流与来源一致', async () => {
+      await newSession(); await setChips(['p1::m1', 'p3::z1']);
+      mockSearchResults = [{ title: '混合来源', url: 'https://example.com/mixed', snippet: '材料值 2026' }];
+      await js(`document.querySelector('#tgl-search').checked=true`);
+      const before = searchCalls; requests.length = 0;
+      await sendText('混合搜索测试'); assert(await waitDone(), '首次请求未结束');
+      const assertRoute = () => {
+        const generic = lastReq(r => r.body.model === 'm1').body;
+        const native = lastReq(r => r.body.model === 'z1').body;
+        assert(generic.messages.some(m => /外部联网搜索材料/.test(m.content)), '通用模型缺材料');
+        assert(!native.messages.some(m => /外部联网搜索材料/.test(m.content)), '原生模型重复注入材料');
+        assert(!generic.tools && native.tools && native.tools[0].type === 'web_search', '原生搜索开关分流错误');
+      };
+      assertRoute(); assert(searchCalls === before + 1, '首次通用搜索次数不为 1');
+      const rid = await js(`MM.sessions.current().messages.find(m=>m.role==='assistant').roundId`);
+      const sourceState = await js(`MM.sessions.current().messages.find(m=>m.role==='assistant').results.map(r=>({id:r.modelId,n:(r.sources||[]).length}))`);
+      assert(sourceState.find(r=>r.id==='p1::m1').n === 1 && sourceState.find(r=>r.id==='p3::z1').n === 0, JSON.stringify(sourceState));
+      await js(`MM.chat._retryOneForTest(${JSON.stringify(rid)}, 'p3::z1')`); assert(await waitDone(), '原生模型重试未结束');
+      assertRoute();
+      await js(`MM.chat._retryOneForTest(${JSON.stringify(rid)}, 'p1::m1')`); assert(await waitDone(), '通用模型重试未结束');
+      assertRoute(); assert(searchCalls === before + 1, '单模型重试重复搜索');
+      await js(`Array.from(document.querySelectorAll('.round-tools button')).find(b=>/重新生成/.test(b.textContent)).click()`);
+      assert(await waitDone(), '整轮重试未结束'); assertRoute();
+      assert(searchCalls === before + 1, '整轮重试重复搜索');
+      mockSearchResults = null; await js(`document.querySelector('#tgl-search').checked=false`);
+      return '首轮搜索 1 次，重试复用材料；原生模型独立联网';
+    });
+
+    await run('上下文预算：当前提问和附件占用参与历史裁剪', async () => {
+      const data = await js(`(function(){
+        var u={role:'user',content:'本轮'.repeat(1000)};
+        var s={messages:[{role:'user',content:'旧问'.repeat(700)},{role:'assistant',results:[{status:'done',content:'旧答'.repeat(700)}]},u]};
+        var msgs=MM.chat._buildHistoryForTest(s,u,null,10000,4096,{});
+        var again=MM.chat._buildHistoryForTest(s,u,null,10000,4096,{});
+        return {hasOld:msgs.some(m=>/旧问|旧答/.test(m.content)),last:msgs[msgs.length-1].content,
+          same:JSON.stringify(msgs)===JSON.stringify(again)};
+      })()`);
+      assert(!data.hasOld && data.last.length === 2000 && data.same, JSON.stringify({hasOld:data.hasOld,len:data.last.length,same:data.same}));
+      return '当前提问保留，超预算历史移除';
     });
 
     // ---------- 13. 自动综合 ----------

@@ -316,14 +316,14 @@ ipcMain.handle('chat:send', (e, payload) => {
   (async () => {
     try {
       // 非法 payload 不能留下未处理的 Promise 拒绝；过滤掉缺 model 的条目
-      const jobs = (Array.isArray(targets) ? targets : []).filter(t => t && t.model).map(async ({ model, messages }) => {
+      const jobs = (Array.isArray(targets) ? targets : []).filter(t => t && t.model).map(async ({ model, messages, searchOn: targetSearchOn }) => {
         const em = makeEmitter(requestId, model.id);
         const send = em.send;
         send({ type: 'start' });
         const t0 = Date.now();
         try {
           const { content, reasoning, usage, finish } = await providers.streamChat(resolveModel(model), messages, {
-            searchOn, signal: ac.signal, onEvent: send
+            searchOn: targetSearchOn == null ? searchOn : !!targetSearchOn, signal: ac.signal, onEvent: send
           });
           send({ type: 'done', ms: Date.now() - t0, chars: content.length, usage, finish: finish || undefined });
         } catch (err) {
@@ -550,7 +550,7 @@ ipcMain.handle('search:query', (e, { query, count, requestId }) => {
 ipcMain.handle('search:test', (e, cfg) => {
   const base = (db.config && db.config.search && typeof db.config.search === 'object') ? db.config.search : {};
   const merged = Object.assign({}, base, (cfg && typeof cfg === 'object') ? cfg : {});
-  return search.webSearch(merged, '今日科技新闻', 3);
+  return search.webSearch(merged, '今日科技新闻', 3, { bypassCache: true });
 });
 
 // ---------- IPC：数据导入导出 ----------

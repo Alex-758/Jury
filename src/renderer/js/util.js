@@ -9,13 +9,19 @@ MM.util = {
     const n = document.createElement(tag);
     for (const [k, v] of Object.entries(attrs || {})) {
       if (k === 'class') n.className = v;
-      else if (k === 'html') n.innerHTML = v;
+      else if (k === 'html') {
+        n.innerHTML = v;
+        const walker = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+        let text;
+        while ((text = walker.nextNode())) text.data = MM.util.stripEmoji(text.data);
+      }
       else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
-      else if (v !== null && v !== undefined && v !== false) n.setAttribute(k, v);
+      else if (v !== null && v !== undefined && v !== false) n.setAttribute(k,
+        typeof v === 'string' && ['title', 'alt', 'aria-label', 'placeholder'].includes(k) ? MM.util.stripEmoji(v) : v);
     }
     for (const c of children.flat()) {
       if (c === null || c === undefined || c === false) continue;
-      n.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+      n.appendChild(typeof c === 'string' ? document.createTextNode(MM.util.stripEmoji(c)) : c);
     }
     return n;
   },
@@ -24,6 +30,13 @@ MM.util = {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  },
+
+  // 模型输出、搜索摘要和附件名称统一移除 emoji，保持界面与导出文本的视觉语言一致。
+  // 不改空格、Tab 和换行；同时移除旗帜、肤色、键帽和组合序列的残留字符。
+  stripEmoji(s) {
+    return String(s == null ? '' : s)
+      .replace(/[#*0-9][\uFE0E\uFE0F]?\u20E3|[\p{Extended_Pictographic}\p{Regional_Indicator}\p{Emoji_Modifier}\uFE0E\uFE0F\u200D\u20E3\u{E0020}-\u{E007F}]/gu, '');
   },
 
   uid() { return 'id' + Date.now().toString(36) + Math.random().toString(36).slice(2, 9); },
@@ -45,6 +58,7 @@ MM.util = {
   },
 
   copyText(text) {
+    text = MM.util.stripEmoji(text);
     return navigator.clipboard.writeText(text).catch(() => {
       const ta = document.createElement('textarea');
       ta.value = text; document.body.appendChild(ta); ta.select();
@@ -54,19 +68,14 @@ MM.util = {
 
   // 复制渲染后元素的纯文本（星号等 Markdown 标记在渲染时已被消除，任何地方粘贴都是干净文本）
   copyTextFrom(el) {
-    const text = el ? (el.innerText || '') : '';
-    return navigator.clipboard.writeText(text).catch(() => {
-      const ta = document.createElement('textarea');
-      ta.value = text; document.body.appendChild(ta); ta.select();
-      document.execCommand('copy'); ta.remove();
-    });
+    return MM.util.copyText(el ? (el.innerText || '') : '');
   },
 
   // toast：带淡出过渡；action = { label, fn } 时附带一个「撤销」类操作按钮
   toast(msg, isErr, action) {
     const t = MM.util.$('#toast');
     t.innerHTML = '';
-    t.appendChild(document.createTextNode(msg));
+    t.appendChild(document.createTextNode(MM.util.stripEmoji(msg)));
     if (action && typeof action.fn === 'function') {
       t.appendChild(MM.util.el('button', {
         class: 'toast-act',
@@ -117,15 +126,15 @@ MM.util = {
     opts = opts || {};
     return new Promise(function (resolve) {
       const ov = document.getElementById('confirm-overlay');
-      if (!ov) { resolve(window.confirm(opts.message || '')); return; } // 兜底
+      if (!ov) { resolve(window.confirm(MM.util.stripEmoji(opts.message || ''))); return; } // 兜底
       const title = ov.querySelector('.cf-title');
       const msg = ov.querySelector('.cf-msg');
       const ok = ov.querySelector('.cf-ok');
       const cancel = ov.querySelector('.cf-cancel');
-      title.textContent = opts.title || '确认操作';
-      msg.textContent = opts.message || '';
-      ok.textContent = opts.okText || '确定';
-      cancel.textContent = opts.cancelText || '取消';
+      title.textContent = MM.util.stripEmoji(opts.title || '确认操作');
+      msg.textContent = MM.util.stripEmoji(opts.message || '');
+      ok.textContent = MM.util.stripEmoji(opts.okText || '确定');
+      cancel.textContent = MM.util.stripEmoji(opts.cancelText || '取消');
       // 危险操作时换配色，但保留 cf-ok 钩子类：整体覆盖 className 会让
       // 「程序化点确认」的代码（自动化测试、未来的快捷键逻辑）找不到按钮
       ok.className = 'cf-ok ' + (opts.danger ? 'btn-danger' : 'btn-primary');

@@ -68,7 +68,7 @@ app.whenReady().then(async () => {
     var afterDelta = resNow.content;
     MM.chat._handleEventForTest({requestId: p.requestId, modelId: mid, type:'done', ms:500, chars:7, usage:{input:100, output:20}});
     var st = document.querySelector('.answer-card .ac-status');
-    return JSON.stringify({afterDelta: afterDelta, doneOk: st ? st.textContent.indexOf('✓') >= 0 && /tok/.test(st.textContent) : false});
+    return JSON.stringify({afterDelta: afterDelta, doneOk: st ? st.textContent.indexOf('完成') >= 0 && /tok/.test(st.textContent) : false});
   })()`);
   o = JSON.parse(r);
   check('delta 事件通过缓存更新到重试的卡片', o.afterDelta === '重试流式内容', r);

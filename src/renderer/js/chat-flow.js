@@ -74,13 +74,18 @@
 
   // 发起一轮多模型请求并渲染占位卡片（inheritVersions：重试时继承的历史版本池；
   // carriedPruned：上一轮已累计的版本裁剪用量，轮次重建后要接着记，不能凭空消失）
+  function nativeSearch(m) {
+    return !!(m && (m.provider === 'dashscope' || m.provider === 'zhipu' || m.provider === 'openrouter'));
+  }
+
   async function dispatchRound(s, userMsg, models, searchOn, appendUserDom, inheritVersions, carriedPruned) {
     const myToken = ++runToken;
     const wrap = U.$('#messages');
     // 关闭联网搜索时不能沿用上一轮缓存的来源（旧结果可能已过时，还会把 searchOn 抬成 true）
     let searchResults = null;
     let preGrid = null; // 搜索期间的占位网格（避免"点了发送界面没反应"）
-    if (searchOn) {
+    const needsWebSearch = searchOn && models.some(m => !nativeSearch(m));
+    if (needsWebSearch) {
       searchResults = userMsg.sources || null;
       // 纯图片提问没有可搜的文字：跳过搜索阶段，避免拿空串去请求
       if (!searchResults && String(userMsg.content || '').trim()) {
@@ -100,7 +105,7 @@
         curSearchSessionId = s.id;
         try {
           searchResults = await api.search(userMsg.content, 6, curSearchId);
-          if (!searchResults) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
+          if (!searchResults || !searchResults.length) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
         } catch (e) {
           // 被停止（chat:stop 经 activeRequests 中止）或已开新一轮：属预期，静默；
           // 其余失败照常提示
@@ -131,14 +136,14 @@
 
     const roundId = U.uid();
     const reqId = nextReqId('req');
-    // 取所选模型中最小的上下文窗口做裁剪，确保所有模型都不超限
-    const ctxLimits = models.map(x => x.contextTokens).filter(Boolean);
-    const ctxLimit = ctxLimits.length ? Math.min.apply(null, ctxLimits) : 0;
-    const maxOut = Math.max.apply(null, models.map(x => x.maxTokens || 4096));
-    // 历史按模型各建一份：多模态模型的当前轮带原图引用，纯文本模型带提取的文字
+    // 历史按模型各自的上下文窗口和输出上限裁剪，避免小窗口模型压缩所有模型的历史，
+    // 也避免某个模型的超大输出上限挤占其他模型的输入预算。
+    // 多模态模型的当前轮带原图引用，纯文本模型带提取的文字。
     const skipped = m => modelSkippedForRound(m, userMsg);
     const targets = models.filter(m => !skipped(m))
-      .map(m => ({ model: stripModel(m), messages: buildHistory(s, userMsg, searchResults, ctxLimit, maxOut, m) }));
+      .map(m => ({ model: stripModel(m), searchOn: !!searchOn && nativeSearch(m), messages: buildHistory(s, userMsg,
+        nativeSearch(m) ? null : searchResults,
+        m.contextTokens || 0, m.maxTokens || 4096, m) }));
 
     const assistantMsg = {
       id: U.uid(), role: 'assistant', roundId: roundId, createdAt: Date.now(),
@@ -153,9 +158,11 @@
       })
     };
     if (carriedPruned) assistantMsg.prunedTokens = carriedPruned;
-    // 把联网搜索来源挂到每个回答上：卡片里的「📎 搜索来源」从这里读取
+    // 把联网搜索来源挂到每个回答上：卡片里的来源区从这里读取
     if (searchResults && searchResults.length) {
-      for (const r of assistantMsg.results) r.sources = searchResults;
+      for (const r of assistantMsg.results) {
+        if (!nativeSearch(models.find(m => m.id === r.modelId))) r.sources = searchResults;
+      }
     }
     s.messages.push(assistantMsg);
     s.updatedAt = Date.now();
@@ -193,7 +200,7 @@
       scrollBottom(true);
     }
     try {
-      await api.send({ requestId: reqId, targets: targets, searchOn: !!searchOn });
+      await api.send({ requestId: reqId, targets: targets, searchOn: false });
     } catch (e) {
       pending.delete(reqId);
       streaming = null;
@@ -286,13 +293,13 @@
       const body = ctx.mergeBody, status = ctx.mergeStatus;
       if (ev.type === 'start') { status.innerHTML = '<span class="spinner"></span> 生成中…'; }
       else if (ev.type === 'delta') {
-        ctx.mergeMsg.content += ev.text;
+        ctx.mergeMsg.content = U.stripEmoji(ctx.mergeMsg.content + ev.text);
         scheduleStreamPaint(body, function () { if (!ctx.mergeFailed) paintStreamText(body, ctx.mergeMsg.content); });
       }
       else if (ev.type === 'done' && ev.usage) {
         // 综合也是真实请求，占用量要一并记下并显示，否则统计会漏掉这一项
         ctx.mergeMsg.usage = ev.usage;
-        status.innerHTML = '✓ 完成' + usageBadge(ev.usage, { modelId: ctx.mergeMsg.modelId });
+        status.innerHTML = '<span class="badge ok">完成</span>' + usageBadge(ev.usage, { modelId: ctx.mergeMsg.modelId });
       }
       else if (ev.type === 'error') {
         if (/已停止/.test(ev.message || '')) {
@@ -301,12 +308,12 @@
           ctx.mergeMsg.stopped = true;
           if (ev.usage) ctx.mergeMsg.usage = ev.usage;
           ctx.mergeMsg.content += '\n\n（已停止，内容不完整，可点「重新综合」重出完整版）';
-          status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(ctx.mergeMsg.usage, { modelId: ctx.mergeMsg.modelId });
+          status.innerHTML = '<span class="badge muted">已停止</span>' + usageBadge(ctx.mergeMsg.usage, { modelId: ctx.mergeMsg.modelId });
         } else {
           // 综合失败：回滚 merge 状态，允许用户再次点击“综合回答”
           ctx.mergeFailed = true; // 标记失败，随后的 all-done 不能把状态改回“完成”
           ctx.mergeMsg.content += '\n\n（综合失败：' + ev.message + '）';
-          status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+          status.innerHTML = '<span class="badge err">失败</span>';
         }
         if (ctx.am) {
           if (!ctx.mergeMsg.stopped) ctx.am.merge = null;
@@ -331,12 +338,12 @@
     if (ev.type === 'start') {
       status.innerHTML = '<span class="spinner"></span> 生成中…';
     } else if (ev.type === 'delta') {
-      res.content += ev.text;
+      res.content = U.stripEmoji(res.content + ev.text);
       // 绘制前检查状态：error/done 事件可能在同一帧内先到，
       // 不能让排队的旧绘制把错误信息/渲染结果覆盖回纯文本
       scheduleStreamPaint(body, function () { if (res.status === 'streaming') paintStreamText(body, res.content); });
     } else if (ev.type === 'reasoning') {
-      res.reasoning = (res.reasoning || '') + ev.text;
+      res.reasoning = U.stripEmoji((res.reasoning || '') + ev.text);
       if (!refs.reasoning) {
         let det = card.querySelector('details.reasoning');
         if (!det) {
@@ -352,7 +359,7 @@
       if (rBody) scheduleStreamPaint(rBody, function () { if (res.status === 'streaming') paintStreamText(rBody, res.reasoning); });
     } else if (ev.type === 'sources') {
       // 模型原生联网的引用注回（OpenRouter/OpenAI 的 url_citation 等）：
-      // 并入该回答的来源列表（按 url 去重），卡片上补 📎 来源区
+      // 并入该回答的来源列表（按 url 去重），卡片上补来源区
       const list = (ev.sources || []).filter(s => s && s.url && !(res.sources || []).some(x => x.url === s.url));
       if (list.length) {
         res.sources = (res.sources || []).concat(list);
@@ -376,7 +383,7 @@
       if (ev.usage) res.usage = ev.usage;
       body.classList.remove('streaming');
       if (res.status === 'error') {
-        body.innerHTML = '<div class="ac-error">✗ ' + U.esc(ev.message) + '</div>';
+        body.innerHTML = '<div class="ac-error">失败：' + U.esc(U.stripEmoji(ev.message)) + '</div>';
       } else if (res.content) {
         body.classList.add('md');
         body.innerHTML = mdHtml(res, res.content);
@@ -522,7 +529,11 @@
 
     // 重置该条结果并原位替换为流式卡片（事件按 modelId 找卡片，ctx.grid 直接指向现有网格）
     res.status = 'streaming'; res.content = ''; res.reasoning = '';
-    delete res.error; delete res.ms; delete res.chars; delete res.usage;
+    delete res.error; delete res.ms; delete res.chars; delete res.usage; delete res.finish;
+    const searchOn = am.searchOn === undefined ? !!userMsg.sources : !!am.searchOn;
+    const searchResults = searchOn && !nativeSearch(flat) ? userMsg.sources || null : null;
+    delete res.sources;
+    if (searchResults && searchResults.length) res.sources = searchResults;
     MM.save();
 
     streaming = s.id;
@@ -542,10 +553,9 @@
     }
 
     const ctxLimit = flat.contextTokens || 0;
-    const history = buildHistory(s, userMsg, userMsg.sources || null, ctxLimit, flat.maxTokens || 4096, flat);
+    const history = buildHistory(s, userMsg, searchResults, ctxLimit, flat.maxTokens || 4096, flat);
     // 联网条件与原轮保持一致：本轮记录过 searchOn 就用它（百炼/智谱/OpenRouter 的原生
     // 搜索没有 sources 存档，只看 sources 会让重试悄悄丢掉联网）；旧数据回落 sources
-    const searchOn = am.searchOn === undefined ? !!userMsg.sources : !!am.searchOn;
     pending.set(reqId, {
       session: s, assistantMsg: am, grid: gridEl, userMsg: userMsg, singleRetry: true, retryModelId: modelId,
       cards: new Map(fresh ? [[modelId, cardRefs(fresh)]] : [])
@@ -553,7 +563,8 @@
     if (!fresh) renderAll(); // 网格不在 DOM（理论不可达）：走 live 重建路径重新绑定节点
     scrollBottom(true);
     try {
-      await api.send({ requestId: reqId, targets: [{ model: stripModel(flat), messages: history }], searchOn: searchOn });
+      await api.send({ requestId: reqId, targets: [{ model: stripModel(flat), messages: history,
+        searchOn: searchOn && nativeSearch(flat) }], searchOn: false });
     } catch (e) {
       pending.delete(reqId);
       streaming = null; setSendBtn(false);
@@ -619,7 +630,7 @@
     }
     const okResults = (am.results || [])
       .filter(r => (r.status === 'done' || r.status === 'stopped') && r.content)
-      .map(r => ({ modelId: r.modelId, name: r.name, content: r.content }));
+      .map(r => ({ modelId: r.modelId, name: r.name, content: r.content, sources: r.sources }));
     if (!okResults.length) { U.toast('没有可合并的成功回答', true); return; }
 
     const cfg = MM.state.config.synthesis || {};
@@ -680,7 +691,7 @@
     const sys = effectiveSystemPrompt(s);
     // 按综合模型的上下文给提示词设 token 上限，避免多份长回答顶爆上下文；
     // 系统提示词同样占上下文，一并扣掉
-    const promptBudget = Math.max(4000, (model.contextTokens || 32768) - (model.maxTokens || 4096) - 2048
+    const promptBudget = Math.max(512, (model.contextTokens || 32768) - (model.maxTokens || 4096) - 2048
       - (sys ? MM.merge.tokensOf(sys) : 0));
     const prompt = MM.merge.synthesisPrompt(userMsg.content, okResults, promptBudget, prevRoundContext(s, idx));
     const synthMsgs = [];
@@ -709,8 +720,8 @@
       const oldTools = byRound('.round-tools', roundId, wrap);
       if (oldTools) oldTools.replaceWith(roundTools(am, true));
       const body = card && card.querySelector('.ac-body'), st = card && card.querySelector('.ac-status');
-      if (body) { body.classList.remove('streaming'); body.innerHTML = '<div class="ac-error">✗ ' + U.esc(e.message) + '</div>'; }
-      if (st) st.innerHTML = '<span style="color:var(--danger)">✗</span>';
+      if (body) { body.classList.remove('streaming'); body.innerHTML = '<div class="ac-error">失败：' + U.esc(U.stripEmoji(e.message)) + '</div>'; }
+      if (st) st.innerHTML = '<span class="badge err">失败</span>';
       addMergeRetryBtn(card, roundId);
     }
   }
@@ -751,9 +762,9 @@
     // 综合请求的 token 用量一并显示（用量存在 mergeMsg 上，会随版本快照一起保留）
     const mu = ctx.mergeMsg.usage;
     const mBadge = { modelId: ctx.mergeMsg.modelId };
-    if (failed) status.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(mu, mBadge);
-    else if (ctx.mergeMsg.stopped) status.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(mu, mBadge);
-    else status.innerHTML = (ctx.mergeMsg.mode === 'model' ? '✓ 完成' : '✓ 已合并') + usageBadge(mu, mBadge);
+    if (failed) status.innerHTML = '<span class="badge err">失败</span>' + usageBadge(mu, mBadge);
+    else if (ctx.mergeMsg.stopped) status.innerHTML = '<span class="badge muted">已停止</span>' + usageBadge(mu, mBadge);
+    else status.innerHTML = '<span class="badge ok">' + (ctx.mergeMsg.mode === 'model' ? '完成' : '已合并') + '</span>' + usageBadge(mu, mBadge);
     // 恢复工具栏（综合回答入口随 am.merge 状态更新）
     const wrap = U.$('#messages');
     const grid = byRound('.answers', ctx.roundId, wrap);
@@ -791,6 +802,26 @@
   }
   function reviewHasContent(review) {
     return !!review && (!!review.verdict || (review.items || []).some(i => i.content));
+  }
+
+  function reviewProgress(review) {
+    const items = (review && review.items) || [];
+    const completed = items.filter(i => i && i.status === 'done').length;
+    const failed = items.filter(i => i && i.status === 'error').length;
+    const stopped = items.filter(i => i && i.status === 'stopped').length;
+    return { completed, total: items.length, failed, stopped, settled: completed + failed + stopped };
+  }
+
+  function reviewStatusHtml(review, failed) {
+    const v = review.verdict;
+    const p = reviewProgress(review);
+    let cls = 'ok', text = '完成';
+    if (failed || (v && v.error) || (!v && !review.stopped)) { cls = 'err'; text = '失败'; }
+    else if ((v && v.stopped) || (!v && review.stopped)) {
+      cls = 'muted'; text = p.completed < p.total ? '部分完成 · 已停止' : '已停止';
+    } else if (p.completed < p.total) { cls = 'warn'; text = '部分完成 ' + p.completed + '/' + p.total; }
+    return '<span class="badge ' + cls + '" title="成功 ' + p.completed + ' · 失败 ' + p.failed + ' · 停止 ' + p.stopped + '">' +
+      text + '</span>' + usageBadge(reviewUsage(review), { cost: reviewCost(review) });
   }
 
   // ---------- 审查版本化（③） ----------
@@ -847,13 +878,13 @@
       const iStatus = U.el('span', { class: 'ac-status' });
       const streamingNow = live && phase === 2 && it.status === 'streaming';
       if (streamingNow) iStatus.innerHTML = '<span class="spinner"></span>';
-      else if (it.status === 'done') iStatus.innerHTML = '✓';
-      else if (it.status === 'stopped') iStatus.innerHTML = '<span class="badge muted">⏹</span>';
-      else if (it.status === 'error') iStatus.innerHTML = '<span style="color:var(--danger)">✗</span>';
+      else if (it.status === 'done') iStatus.innerHTML = '<span class="badge ok">完成</span>';
+      else if (it.status === 'stopped') iStatus.innerHTML = '<span class="badge muted">已停止</span>';
+      else if (it.status === 'error') iStatus.innerHTML = '<span class="badge err">失败</span>';
       const iBody = U.el('div', { class: 'rv-item-body' + (streamingNow ? ' streaming' : it.content ? ' md' : '') });
-      if (streamingNow) iBody.textContent = it.content || '';
+      if (streamingNow) iBody.textContent = U.stripEmoji(it.content || '');
       else if (it.content) iBody.innerHTML = MM.md.render(it.content);
-      else if (it.status === 'error') iBody.innerHTML = '<span style="color:var(--danger)">✗ ' + U.esc(it.error || '失败') + '</span>';
+      else if (it.status === 'error') iBody.innerHTML = '<span style="color:var(--danger)">' + U.esc(U.stripEmoji(it.error || '失败')) + '</span>';
       findings.appendChild(U.el('div', { class: 'rv-item', 'data-model-id': it.modelId },
         U.el('div', { class: 'rv-item-head' },
           U.el('span', { class: 'ac-dot', style: 'background:' + MM.settings.dotColor(it.modelId) }),
@@ -865,7 +896,7 @@
     if (review.verdict) {
       const v = review.verdict;
       const vBody = U.el('div', { class: 'rv-verdict-body' + (live && phase === 3 ? ' streaming' : ' md') });
-      if (live && phase === 3) vBody.textContent = v.content || '';
+      if (live && phase === 3) vBody.textContent = U.stripEmoji(v.content || '');
       else vBody.innerHTML = MM.md.render(v.content || '（空）');
       body.appendChild(U.el('div', { class: 'rv-verdict' },
         U.el('div', { class: 'rv-verdict-head' },
@@ -875,14 +906,7 @@
     }
     // 卡片头部状态
     if (live) rStatus.innerHTML = '<span class="spinner"></span> ' + (phase === 3 ? '仲裁中…' : '互审中…');
-    else {
-      const u = reviewUsage(review);
-      const rBadge = { cost: reviewCost(review) };
-      if (!review.verdict && review.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
-      else if (review.verdict && review.verdict.stopped) rStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
-      else if (review.verdict) rStatus.innerHTML = '✓ 完成' + usageBadge(u, rBadge);
-      else rStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u, rBadge);
-    }
+    else rStatus.innerHTML = reviewStatusHtml(review);
     card.appendChild(U.el('div', { class: 'card-foot' },
       U.el('button', { class: 'ac-copy', onclick: function () { U.copyTextFrom(body); U.toast('已复制'); } }, '复制')));
     MM.md.bindCopy(card);
@@ -937,9 +961,9 @@
   function updateReviewHeadStatus(ctx) {
     const refs = ctx.rvRefs;
     if (!refs || ctx.reviewPhase !== 2) return;
-    const items = ctx.review.items || [];
-    const done = items.filter(i => i.status === 'done' || i.status === 'stopped').length;
-    refs.headStatus.innerHTML = '<span class="spinner"></span> 互审中 ' + done + '/' + items.length + '…';
+    const p = reviewProgress(ctx.review);
+    refs.headStatus.innerHTML = '<span class="spinner"></span> 互审中 ' + p.settled + '/' + p.total + '…' +
+      (p.failed ? '（失败 ' + p.failed + '）' : '');
   }
 
   function finalizeReviewCard(ctx, failed) {
@@ -957,12 +981,10 @@
         vr.body.innerHTML = MM.md.render(v.content || '（空）');
         decorateMergeSources(vr.body, v, ctx.am.results, ctx.roundId);
       }
-      const u = reviewUsage(review);
-      const rBadge = { cost: reviewCost(review) };
-      if (failed) ctx.rvRefs.headStatus.innerHTML = '<span style="color:var(--danger)">✗ 失败</span>' + usageBadge(u, rBadge);
-      else if ((review.stopped && !v) || (v && v.stopped)) ctx.rvRefs.headStatus.innerHTML = '<span class="badge muted">⏹ 已停止</span>' + usageBadge(u, rBadge);
-      else ctx.rvRefs.headStatus.innerHTML = '✓ 完成' + usageBadge(u, rBadge);
-      if (failed || (review.stopped && !v) || (v && v.stopped)) addReviewRetryBtn(card, ctx.roundId);
+      ctx.rvRefs.headStatus.innerHTML = reviewStatusHtml(review, failed);
+      if (failed || review.stopped || (v && (v.stopped || v.error)) || reviewProgress(review).completed < reviewProgress(review).total) {
+        addReviewRetryBtn(card, ctx.roundId);
+      }
     }
     // 恢复工具栏（交叉审查入口随 am.review 状态更新）
     const wrap = U.$('#messages');
@@ -991,6 +1013,13 @@
       .filter(r => (r.status === 'done' || r.status === 'stopped') && r.content)
       .map(r => ({ modelId: r.modelId, name: r.name, content: r.content }));
     if (okResults.length < 2) { U.toast('交叉审查至少需要两份成功回答', true); return; }
+    const sourceMap = new Map();
+    for (const result of (am.results || [])) {
+      for (const source of (result && result.sources) || []) {
+        if (source && source.url && !sourceMap.has(source.url)) sourceMap.set(source.url, source);
+      }
+    }
+    const reviewSources = Array.from(sourceMap.values()).slice(0, 8);
     if (hasAnyReview(am)) {
       if (!opts.redo) { U.toast('该轮已有审查记录，可点「重新审查」新增一份', true); return; }
       const okc = await U.confirm({
@@ -1047,9 +1076,9 @@
 
     const sys = effectiveSystemPrompt(s);
     const targets = reviewers.map(x => {
-      const budget = Math.max(4000, (x.model.contextTokens || 32768) - (x.model.maxTokens || 4096) - 2048
+      const budget = Math.max(512, (x.model.contextTokens || 32768) - (x.model.maxTokens || 4096) - 2048
         - (sys ? MM.merge.tokensOf(sys) : 0));
-      const prompt = MM.merge.reviewPrompt(userMsg.content, okResults, x.i, budget);
+      const prompt = MM.merge.reviewPrompt(userMsg.content, okResults, x.i, budget, reviewSources);
       const msgs = sys ? [{ role: 'system', content: sys }] : [];
       msgs.push({ role: 'user', content: prompt });
       return { model: stripModel(x.model), messages: msgs };
@@ -1058,7 +1087,7 @@
     pending.set(reqId, {
       reviewCtx: true, reviewPhase: 2, reviewStopped: false,
       session: s, am: am, roundId: roundId, review: review,
-      arbiter: arbiter, okResults: okResults, userQuestion: userMsg.content,
+      arbiter: arbiter, okResults: okResults, reviewSources: reviewSources, userQuestion: userMsg.content,
       rvCard: inView ? card : null,
       rvRefs: inView ? reviewRefsOf(card) : null
     });
@@ -1076,7 +1105,7 @@
       if (card && card.isConnected) {
         for (const el of Array.from(card.querySelectorAll('.rv-item'))) {
           const b = el.querySelector('.rv-item-body');
-          if (b && !b.textContent) b.innerHTML = '<span style="color:var(--danger)">✗ 请求未能启动</span>';
+          if (b && !b.textContent) b.innerHTML = '<span style="color:var(--danger)">请求未能启动</span>';
         }
       }
       finalizeReviewCard({ am: am, review: review, roundId: roundId, rvCard: card, rvRefs: inView ? reviewRefsOf(card) : null }, true);
@@ -1093,23 +1122,24 @@
       const refs = ctx.rvRefs && ctx.rvRefs.verdict;
       if (ev.type === 'start') { if (refs) refs.status.innerHTML = '<span class="spinner"></span>'; }
       else if (ev.type === 'delta') {
-        v.content += ev.text;
+        v.content = U.stripEmoji(v.content + ev.text);
         if (refs) scheduleStreamPaint(refs.body, function () { paintStreamText(refs.body, v.content); });
       }
-      else if (ev.type === 'done' && ev.usage) {
-        v.usage = ev.usage; v.ms = ev.ms || 0;
-        if (refs) refs.status.innerHTML = '✓'; // 仲裁块的 status 在此落终态，否则 spinner 永转
+      else if (ev.type === 'done') {
+        v.status = 'done'; v.usage = ev.usage || null; v.ms = ev.ms || 0;
+        if (refs) refs.status.innerHTML = '<span class="badge ok">完成</span>'; // 仲裁块的 status 在此落终态，否则 spinner 永转
       }
       else if (ev.type === 'error') {
+        v.ms = ev.ms || 0;
+        if (ev.usage) v.usage = ev.usage;
         if (/已停止/.test(ev.message || '')) {
-          v.stopped = true;
-          if (ev.usage) v.usage = ev.usage;
+          v.status = 'stopped'; v.stopped = true;
           v.content += '\n\n（已停止，内容不完整，可点「重新审查」重出完整版）';
-          if (refs) refs.status.innerHTML = '<span class="badge muted">⏹</span>';
+          if (refs) refs.status.innerHTML = '<span class="badge muted">已停止</span>';
         } else {
-          ctx.verdictFailed = true;
+          ctx.verdictFailed = true; v.status = 'error'; v.error = ev.message || '仲裁失败';
           v.content += '\n\n（仲裁失败：' + ev.message + '）';
-          if (refs) refs.status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+          if (refs) refs.status.innerHTML = '<span class="badge err">失败</span>';
         }
       }
       return;
@@ -1122,7 +1152,7 @@
       // 挂上流式类：流式期间保留换行（CSS .rv-item-body.streaming 的既有钩子）
       if (refs) { refs.status.innerHTML = '<span class="spinner"></span>'; refs.body.classList.add('streaming'); }
     } else if (ev.type === 'delta') {
-      it.content += ev.text;
+      it.content = U.stripEmoji(it.content + ev.text);
       if (refs) scheduleStreamPaint(refs.body, function () { paintStreamText(refs.body, it.content); });
     } else if (ev.type === 'done') {
       it.status = 'done'; it.usage = ev.usage || null; it.ms = ev.ms || 0;
@@ -1132,10 +1162,12 @@
         refs.body.classList.remove('streaming');
         refs.body.classList.add('md');
         refs.body.innerHTML = MM.md.render(it.content || '');
-        refs.status.innerHTML = '✓';
+        refs.status.innerHTML = '<span class="badge ok">完成</span>';
       }
       updateReviewHeadStatus(ctx);
     } else if (ev.type === 'error') {
+      it.ms = ev.ms || 0;
+      if (ev.usage) it.usage = ev.usage;
       if (/已停止/.test(ev.message || '')) {
         it.status = 'stopped';
         ctx.reviewStopped = true;
@@ -1143,15 +1175,15 @@
         if (refs) {
           refs.body._paint = null;
           if (it.content) { refs.body.classList.remove('streaming'); refs.body.classList.add('md'); refs.body.innerHTML = MM.md.render(it.content); }
-          refs.status.innerHTML = '<span class="badge muted">⏹</span>';
+          refs.status.innerHTML = '<span class="badge muted">已停止</span>';
         }
       } else {
         it.status = 'error'; it.error = ev.message;
         if (refs) {
           refs.body._paint = null;
           if (it.content) { refs.body.classList.remove('streaming'); refs.body.classList.add('md'); refs.body.innerHTML = MM.md.render(it.content); }
-          else refs.body.innerHTML = '<span style="color:var(--danger)">✗ ' + U.esc(ev.message || '失败') + '</span>';
-          refs.status.innerHTML = '<span style="color:var(--danger)">✗</span>';
+          else refs.body.innerHTML = '<span style="color:var(--danger)">' + U.esc(U.stripEmoji(ev.message || '失败')) + '</span>';
+          refs.status.innerHTML = '<span class="badge err">失败</span>';
         }
       }
       updateReviewHeadStatus(ctx);
@@ -1166,7 +1198,7 @@
       // 用户按了停止就必须停在这里：哪怕互审已有完成项，也不许再自发起新的仲裁请求
       //（那会重新锁住输入框并继续消耗 token，覆盖用户的停止意图）
       if (!anyDone || ctx.reviewStopped) {
-        review.stopped = true;
+        review.stopped = !!ctx.reviewStopped;
         finalizeReviewCard(ctx, !ctx.reviewStopped);
         MM.save();
         return;
@@ -1177,16 +1209,16 @@
       if (MM.sessions.current() === ctx.session) setSendBtn(true);
       MM.save();
       const sys = effectiveSystemPrompt(ctx.session);
-      const budget = Math.max(4000, (ctx.arbiter.contextTokens || 32768) - (ctx.arbiter.maxTokens || 4096) - 2048
+      const budget = Math.max(512, (ctx.arbiter.contextTokens || 32768) - (ctx.arbiter.maxTokens || 4096) - 2048
         - (sys ? MM.merge.tokensOf(sys) : 0));
       const reviews = (review.items || [])
         .filter(i => (i.status === 'done' || i.status === 'stopped') && i.content)
         .map(i => ({ content: i.content }));
-      const prompt = MM.merge.verdictPrompt(ctx.userQuestion, ctx.okResults, reviews, budget);
+      const prompt = MM.merge.verdictPrompt(ctx.userQuestion, ctx.okResults, reviews, budget, ctx.reviewSources);
       const msgs = sys ? [{ role: 'system', content: sys }] : [];
       msgs.push({ role: 'user', content: prompt });
       review.verdict = {
-        content: '', usage: null, ms: 0, stopped: false,
+        content: '', usage: null, ms: 0, stopped: false, status: 'streaming',
         // 仲裁也消耗 token：记下仲裁模型（flat id，与回答行口径一致），用量面板按模型拆分时能归因
         modelId: ctx.arbiter.id || ctx.arbiter.modelId || '',
         modelName: ctx.arbiter.name || ctx.arbiter.modelId || ''
@@ -1208,7 +1240,10 @@
           streaming = null;
           setSendBtn(false);
           U.toast('仲裁失败：' + e.message, true);
-          if (review.verdict) review.verdict.content += '\n\n（仲裁失败：' + e.message + '）';
+          if (review.verdict) {
+            review.verdict.status = 'error'; review.verdict.error = e.message || '仲裁失败';
+            review.verdict.content += '\n\n（仲裁失败：' + e.message + '）';
+          }
           finalizeReviewCard(ctx, true);
           MM.save();
         });

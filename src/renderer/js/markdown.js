@@ -30,7 +30,7 @@ window.MM = window.MM || {};
     if (src == null) return '';
     // 先抽出围栏代码块，避免内部被解析
     const blocks = [];
-    src = String(src).replace(/```([\w+-]*)[^\n]*\n?([\s\S]*?)(?:```|$)/g, (m, lang, code) => {
+    src = MM.util.stripEmoji(String(src)).replace(/```([\w+-]*)[^\n]*\n?([\s\S]*?)(?:```|$)/g, (m, lang, code) => {
       blocks.push({ lang, code });
       return '\u0000B' + (blocks.length - 1) + '\u0000';
     });
@@ -129,7 +129,7 @@ window.MM = window.MM || {};
         const btn = e.target.closest('.code-copy');
         if (btn) {
           MM.util.copyText(btn.getAttribute('data-code'));
-          btn.textContent = '已复制 ✓';
+          btn.textContent = '已复制';
           setTimeout(() => { btn.textContent = '复制'; }, 1500);
         }
       });

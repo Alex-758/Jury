@@ -681,7 +681,7 @@ server.listen(0, '127.0.0.1', () => {
       const req = lastReq();
       assert(req.body.model === 'a"b c', 'model=' + req.body.model);
       const st = await js("document.querySelector('.ac-status').textContent");
-      assert(/✓/.test(st), 'st=' + st);
+      assert(/完成/.test(st), 'st=' + st);
       // 还原模型 ID
       await js(`(function(){ MM.settings.open(); document.querySelector('.settings-nav[data-pane="models"]').click(); })()`);
       await sleep(200);

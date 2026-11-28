@@ -101,6 +101,33 @@ MM.defaults = {
     }
   ],
 
+  PROMPT_TEMPLATES: [
+    {
+      id: 'general', name: '通用助手', description: '适合日常问答，兼顾简洁、清晰与可靠。',
+      prompt: '默认使用简体中文；用户指定其他语言或格式时，遵从用户要求。直接回应问题，简单问题简洁回答，复杂问题按需要展开。区分事实、推测和建议；不确定时明确说明，不编造数据、来源或执行结果。缺少会影响结论的关键信息时先澄清，次要信息可以说明假设后继续。按需要使用列表、表格和示例，避免空话、重复和 emoji。'
+    },
+    {
+      id: 'research', name: '研究分析', description: '适合比较方案、分析问题和梳理证据。',
+      prompt: '默认使用简体中文；用户指定其他语言或格式时，遵从用户要求。围绕研究问题先给主要结论，再说明依据、关键假设和局限。比较不同观点时说明各自证据与适用条件，区分事实、推测和建议。标出存在分歧或尚待核实的信息，不编造数据、引文和来源；无法核实时明确说明。避免空话、重复和 emoji。'
+    },
+    {
+      id: 'coding', name: '编程协作', description: '适合读代码、排查问题和实现改动。',
+      prompt: '默认使用简体中文；用户指定其他语言或格式时，遵从用户要求。先理解需求和已有代码，再提出或实施最小必要改动，沿用项目现有风格与依赖。缺少影响实现的关键信息时先澄清，不擅自扩展需求。说明改动原因、验证结果和未验证项，不声称执行过未执行的命令或测试。给出代码时保留必要上下文。避免空话、重复和 emoji。'
+    },
+    {
+      id: 'writing', name: '写作润色', description: '适合调整表达、整理结构和润色文稿。',
+      prompt: '默认使用简体中文；用户指定其他语言或格式时，遵从用户要求。保留原意、事实和关键细节，按目标读者与用途调整结构、语气和措辞。优先使用自然、具体、简洁的表达，减少套话和重复，不擅自添加事实或夸大结论。用户要求润色时先给可直接使用的文本，必要时简要说明关键调整；原文含糊且影响含义时先澄清。避免 emoji。'
+    },
+    {
+      id: 'summary', name: '资料总结', description: '适合提炼文档、会议记录和长篇资料。',
+      prompt: '默认使用简体中文；用户指定其他语言或格式时，遵从用户要求。依据所给资料先提炼主要结论，再整理关键事实、依据与必要细节；有明确待办时列出行动项、负责人和时间，缺失信息标为未说明。保留重要数字、条件和分歧，区分原文内容与补充推断，不把未提供的信息写成事实。按需标注原文位置，避免空话、重复和 emoji。'
+    },
+    {
+      id: 'translation', name: '翻译校对', description: '适合忠实翻译、统一术语和检查译文。',
+      prompt: '按用户指定的目标语言、语气和格式翻译；目标语言不明确时先询问。忠实保留原意、逻辑、数字、专名和必要格式，使译文自然通顺，术语前后一致。不擅自增删信息；歧义会影响含义时指出并澄清。校对时先给修订后的译文，再按需要简要说明关键修正。默认只输出译文，不附加无关说明或 emoji。'
+    }
+  ],
+
   DEFAULT_CONFIG: {
     providers: [],
     search: { provider: 'bing', apiKey: '' },
@@ -573,7 +600,10 @@ MM.defaults = {
             for (const it of (rv.items || [])) {
               if (it && (it.status === 'pending' || it.status === 'streaming')) { it.status = 'stopped'; rvDirty = true; }
             }
-            if (rv.verdict && !rv.verdict.content && !rv.verdict.stopped) { rv.verdict.stopped = true; rvDirty = true; }
+            if (rv.verdict && (rv.verdict.status === 'streaming' ||
+              (!rv.verdict.status && !rv.verdict.content && !rv.verdict.stopped))) {
+              rv.verdict.status = 'stopped'; rv.verdict.stopped = true; rvDirty = true;
+            }
             if (rvDirty && !rv.verdict) rv.stopped = true;
             if (rvDirty) changed = true;
           }
@@ -630,7 +660,10 @@ MM.defaults = {
     if (!saved || typeof saved !== 'object' || !saved.config || typeof saved.config !== 'object' || !Array.isArray(saved.sessions)) {
       throw new Error('读取本地数据失败（主进程返回的数据格式异常），已停止启动以避免覆盖原有数据。');
     }
+    // 只在没有配置和历史会话的首次启动预填；升级和导入时保留原有内容及留空选择。
+    const firstRun = Object.keys(saved.config).length === 0 && saved.sessions.length === 0;
     MM.state.config = MM.normalizeConfig(saved.config);
+    if (firstRun) MM.state.config.systemPrompt = MM.defaults.PROMPT_TEMPLATES[0].prompt;
     // 恢复历史会话：缺了这一步会以空会话覆盖磁盘上的全部记录
     MM.state.sessions = MM.normalizeSessions(saved.sessions);
     if (!MM.state.sessions.length) MM.sessions.createSilent();
@@ -797,7 +830,7 @@ MM.defaults = {
       '<p style="margin:0 0 10px;color:#6b675a">数据文件可能已损坏或格式异常。请先备份 <code>%APPDATA%\\Jury\\</code> 下的 config.json 与 sessions\\ 目录，再重新加载；如需重置，可删除这些文件后重启（会话记录会丢失）。</p>';
     const pre = document.createElement('pre');
     pre.setAttribute('style', 'max-height:180px;overflow:auto;background:#f2f0e8;border-radius:8px;padding:10px;font-size:11px;white-space:pre-wrap;word-break:break-all;');
-    pre.textContent = detail;
+    pre.textContent = MM.util.stripEmoji(detail);
     const btn = document.createElement('button');
     btn.textContent = '重新加载';
     btn.setAttribute('style', 'margin-top:14px;background:#3d3929;color:#faf9f5;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;');

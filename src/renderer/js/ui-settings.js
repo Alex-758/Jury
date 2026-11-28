@@ -604,7 +604,7 @@ window.MM = window.MM || {};
     const testBtn = U.el('button', { class: 'btn-secondary' }, '测试连接');
     testBtn.addEventListener('click', async () => {
       const mo = (p.models || []).find(x => x.modelId && x.enabled !== false) || (p.models || [])[0];
-      if (!mo || !mo.modelId) { result.className = 'test-result err'; result.textContent = '✗ 请先在模型卡片中添加模型 ID'; return; }
+      if (!mo || !mo.modelId) { result.className = 'test-result err'; result.textContent = '请先在模型卡片中添加模型 ID'; return; }
       testBtn.disabled = true; testBtn.textContent = '测试中…';
       result.className = 'test-result';
       if (!(await commitKeyIfTyped())) { // 输入了新密钥先保存
@@ -616,11 +616,11 @@ window.MM = window.MM || {};
         await MM.save({ configOnly: true });
         const reply = await api.testModel({ apiFormat: p.apiFormat, baseUrl: p.baseUrl, fullUrl: p.fullUrl, modelId: mo.modelId, providerId: p.id, provider: p.provider || p.id });
         result.className = 'test-result ok';
-        result.textContent = '✓ 连接成功（' + mo.modelId + '），回复：' + String(reply).slice(0, 100);
+        result.textContent = '连接成功（' + U.stripEmoji(mo.modelId) + '），回复：' + U.stripEmoji(String(reply)).slice(0, 100);
         U.toast('连接成功：' + String(reply).slice(0, 40));
       } catch (e) {
         result.className = 'test-result err';
-        result.textContent = '✗ ' + e.message;
+        result.textContent = '连接失败：' + U.stripEmoji(e.message);
         U.toast('连接失败：' + e.message, true);
       }
       // 按钮在常驻标题行，结果在连接卡片里：滚到可见位置，避免"点了没反应"
@@ -749,7 +749,7 @@ window.MM = window.MM || {};
       const pv = provSel.value;
       if ((pv === 'tavily' || pv === 'bocha') && !cfg.hasKey && (!keyInput.value.trim() || isSearchMasked())) {
         result.className = 'test-result err';
-        result.textContent = '✗ 所选搜索服务商需要 API 密钥，请填写后再保存';
+        result.textContent = '所选搜索服务商需要 API 密钥，请填写后再保存';
         return;
       }
       if (!(await commitSearchKeyIfTyped())) return;
@@ -760,15 +760,15 @@ window.MM = window.MM || {};
       const pv = provSel.value;
       result.className = 'test-result';
       if (pv === 'none') { result.className = 'test-result err'; result.textContent = '当前为「不使用搜索」，请先选择搜索引擎'; return; }
-      if ((pv === 'tavily' || pv === 'bocha') && !cfg.hasKey && (!keyInput.value.trim() || isSearchMasked())) { result.className = 'test-result err'; result.textContent = '✗ 请先填写 API 密钥'; return; }
+      if ((pv === 'tavily' || pv === 'bocha') && !cfg.hasKey && (!keyInput.value.trim() || isSearchMasked())) { result.className = 'test-result err'; result.textContent = '请先填写 API 密钥'; return; }
       if (!(await commitSearchKeyIfTyped())) return;
       testBtn.disabled = true; testBtn.textContent = '搜索中…';
       try {
         const rs = await api.testSearch({ provider: pv });
-        if (!rs || !rs.length) { result.className = 'test-result err'; result.textContent = '✗ 未返回结果'; }
-        else { result.className = 'test-result ok'; result.textContent = '✓ 返回 ' + rs.length + ' 条结果：' + rs[0].title; }
+        if (!rs || !rs.length) { result.className = 'test-result err'; result.textContent = '未返回结果'; }
+        else { result.className = 'test-result ok'; result.textContent = '返回 ' + rs.length + ' 条结果：' + U.stripEmoji(rs[0].title); }
       } catch (e) {
-        result.className = 'test-result err'; result.textContent = '✗ ' + e.message;
+        result.className = 'test-result err'; result.textContent = '搜索失败：' + U.stripEmoji(e.message);
       }
       testBtn.disabled = false; testBtn.textContent = '测试搜索';
     });
@@ -843,6 +843,21 @@ window.MM = window.MM || {};
     pane.appendChild(U.el('div', { class: 'pane-sub' },
       '设置模型的角色与回答风格，每次提问都会随请求一起发送给所选的全部模型。留空则不注入。'));
 
+    const templates = MM.defaults.PROMPT_TEMPLATES;
+    const templateSel = U.el('select', { id: 'sp-template', 'aria-label': '常用提示词模板', 'aria-describedby': 'sp-template-hint' },
+      templates.map(t => U.el('option', { value: t.id }, t.name)));
+    templateSel.value = (templates.find(t => t.prompt === cfg.systemPrompt) || templates[0]).id;
+    const templateHint = U.el('div', { id: 'sp-template-hint', class: 'hint' });
+    const updateTemplateHint = () => {
+      templateHint.textContent = templates.find(t => t.id === templateSel.value).description + ' 使用后可继续编辑，内容自动保存。';
+    };
+    templateSel.addEventListener('change', updateTemplateHint);
+    updateTemplateHint();
+    const useTemplate = U.el('button', { id: 'sp-use-template', class: 'btn-secondary' }, '使用模板');
+    const templateField = field('常用模板', U.el('div', { class: 'prompt-template-row' }, templateSel, useTemplate));
+    templateField.appendChild(templateHint);
+    pane.appendChild(templateField);
+
     const ta = U.el('textarea', {
       id: 'sp-global', rows: '7',
       placeholder: '例如：你是一位严谨的中文技术顾问。回答要先给结论再给理由，不确定的地方明确说明，不要编造。'
@@ -850,6 +865,24 @@ window.MM = window.MM || {};
     ta.value = cfg.systemPrompt;
     // 输入即写入内存并防抖落盘：设置页可能被直接关掉，不点保存也不会丢
     ta.addEventListener('input', () => { cfg.systemPrompt = ta.value; saveSoonPrompt(); });
+    useTemplate.addEventListener('click', async () => {
+      const template = templates.find(t => t.id === templateSel.value);
+      if (ta.value === template.prompt) return;
+      useTemplate.disabled = true;
+      try {
+        if (ta.value.trim() && !await U.confirm({
+          title: '替换全局提示词',
+          message: '将使用「' + template.name + '」替换当前内容。当前编辑的提示词不会保留，是否继续？',
+          okText: '使用模板'
+        })) return;
+        ta.value = template.prompt;
+        cfg.systemPrompt = ta.value;
+        saveSoonPrompt();
+        ta.focus();
+      } finally {
+        useTemplate.disabled = false;
+      }
+    });
     pane.appendChild(field('全局提示词', ta,
       '不消耗额外请求：它会作为 system 消息插入每一轮对话的历史最前面。',
       '按会话覆盖：聊天页右上角「提示词」按钮可为当前会话单独设置，会话里设了就以会话的为准。'));
@@ -992,7 +1025,7 @@ window.MM = window.MM || {};
         }
       } catch (e) {
         updResult.className = 'test-result err';
-        updResult.textContent = '✗ 检查失败：' + ((e && e.message) || e);
+        updResult.textContent = '检查失败：' + U.stripEmoji((e && e.message) || e);
       }
       checkBtn.disabled = false; checkBtn.textContent = '检查更新';
     });

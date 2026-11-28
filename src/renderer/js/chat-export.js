@@ -5,7 +5,7 @@
   // Windows 文件名清洗：非法字符、保留设备名（CON/NUL/COM1…）、结尾点与空格。
   // 保留名不处理会导出失败，结尾点/空格会被系统静默裁掉
   function safeFilename(title, fallback) {
-    let name = String(title || fallback).replace(/[\\/:*?"<>|]/g, '_').replace(/[.\s]+$/, '').trim();
+    let name = U.stripEmoji(title || fallback).replace(/[\\/:*?"<>|]/g, '_').replace(/[.\s]+$/, '').trim();
     if (/^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i.test(name)) name = '_' + name;
     return (name || fallback).slice(0, 50);
   }
@@ -70,7 +70,7 @@
         L.push('');
         L.push('---');
         L.push('');
-        L.push('*来源对照（报告要点 ↔ 各模型原回答）*：');
+        L.push('*来源对照（报告要点与各模型原回答）*：');
         for (const s of srcs.slice(0, 24)) {
           L.push('- ' + (s.text.length > 60 ? s.text.slice(0, 60) + '…' : s.text) +
             ' —— 来自 ' + s.models.map(m => m.name).join('、'));
@@ -107,7 +107,7 @@
       L.push('');
       L.push(f.text);
     }
-    return L.join('\n');
+    return U.stripEmoji(L.join('\n'));
   }
 
   // 提问附件的一句话说明（导出用）
@@ -196,7 +196,7 @@
         L.push(f.text);
       }
     }
-    return L.join('\n');
+    return U.stripEmoji(L.join('\n'));
   }
 
   async function exportSession() {

@@ -151,7 +151,7 @@
     const chip = U.el('div', { class: 'att-chip' + (a.kind === 'file' ? ' doc' : '') + (a.failed ? ' failed' : ''), title: a.name || '' },
       a.kind === 'image' && a.id
         ? U.el('img', { class: 'att-thumb', src: 'mmimg://' + a.id + '.' + a.ext, alt: '' })
-        : U.el('span', { class: 'att-ico' }, '📄'),
+        : U.el('span', { class: 'att-ico' }, '文件'),
       U.el('div', { class: 'att-meta' },
         U.el('div', { class: 'att-name' }, a.name || (a.kind === 'image' ? '图片' : '文档')),
         U.el('div', { class: 'att-status' }, status)),
@@ -186,7 +186,7 @@
     } else {
       body.appendChild(U.el('pre', { class: 'av-pre' }, a.text || ''));
     }
-    U.$('#av-title').textContent = a.name || (a.kind === 'image' ? '图片' : '附件文本');
+    U.$('#av-title').textContent = U.stripEmoji(a.name || (a.kind === 'image' ? '图片' : '附件文本'));
     // 淡出动画进行中再次打开：清掉 closing 态和挂起的隐藏定时器，否则浮层看不见
     clearTimeout(closeAttachView._t);
     ov.classList.remove('closing', 'hidden');

@@ -24,6 +24,7 @@ const reviewSeen = []; // 收到的互审请求 body.model 顺序
 // reviewSlowSecond 可把指定模型的第二次互审也放慢：场景 A2 需要"一份完成、其余未完成"时停止
 const reviewReqCount = {};
 const reviewSlowSecond = {};
+let failReviewer = '', failVerdict = false, omitVerdictUsage = false;
 const server = http.createServer((req, res) => {
   console.log('[mock ' + Date.now() % 100000 + '] ' + req.method + ' ' + req.url);
   if (req.url.indexOf('/models') >= 0) {
@@ -50,12 +51,15 @@ const server = http.createServer((req, res) => {
     } else {
       cnt.answer++;
     }
+    if ((kind === 'review' && model === failReviewer) || (kind === 'verdict' && failVerdict)) {
+      res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"模拟失败"}}'); return;
+    }
     const usage = { prompt_tokens: 100 + cnt[kind === 'verdict' ? 'verdict' : kind] , completion_tokens: 50 };
     setTimeout(() => {
       try {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
         res.write('data: ' + JSON.stringify({ choices: [{ delta: { content: text } }] }) + '\n\n');
-        res.write('data: ' + JSON.stringify({ choices: [], usage: usage }) + '\n\n');
+        if (!(kind === 'verdict' && omitVerdictUsage)) res.write('data: ' + JSON.stringify({ choices: [], usage: usage }) + '\n\n');
         res.end('data: [DONE]\n\n');
       } catch (e) { /* 客户端已中止：写死管道是正常路径，吞掉 */ }
     }, delay);
@@ -148,7 +152,7 @@ server.listen(0, '127.0.0.1', () => {
       // m1 的第二轮是默认 100ms：停止时恰是"1 份完成、2 份在途"
       reviewSlowSecond['m2'] = true; reviewSlowSecond['m3'] = true;
       await clickBtn("(function(){var b=document.querySelector('.review-card .ac-retry'); if(b) b.click();})()");
-      const m1Done = await poll("(function(){var it=document.querySelector('.review-card .rv-item[data-model-id=\"p1::m1\"] .ac-status');return it&&it.textContent.indexOf('✓')>=0;})()", 6000);
+      const m1Done = await poll("(function(){var it=document.querySelector('.review-card .rv-item[data-model-id=\"p1::m1\"] .ac-status');return it&&it.textContent.indexOf('完成')>=0;})()", 6000);
       check('场景 A2：m1 互审先完成', !!m1Done, '');
       await clickBtn("document.querySelector('#btn-send').click()"); // 一份完成、两份在途时停止
       const stoppedA2 = await poll("(function(){var s=document.querySelector('.review-card .ac-head .ac-status');return s&&s.textContent.indexOf('已停止')>=0;})()", 6000);
@@ -262,6 +266,37 @@ server.listen(0, '127.0.0.1', () => {
       await sleep(250);
       const nav2 = await js(navOf);
       check('场景 E：点 ‹ 切到上一份审查（审查 4/5）', nav2.indexOf('4/5') >= 0, 'label=' + nav2);
+
+      // 部分失败后仲裁成功：成功数必须为 2/3；历史重绘保持相同口径。
+      const redoLast = async () => {
+        await poll("!document.querySelector('#btn-send').classList.contains('stop')", 15000);
+        await js(redoBtn); await sleep(100);
+        await js("(function(){var ok=document.querySelector('#confirm-overlay:not(.hidden) .cf-ok');if(ok)ok.click();})()");
+        await poll("document.querySelector('#btn-send').classList.contains('stop')", 3000);
+        await poll("!document.querySelector('#btn-send').classList.contains('stop')", 15000);
+        await sleep(200);
+      };
+      const lastStatus = "(function(){var cs=document.querySelectorAll('.review-card');var c=cs[cs.length-1];return c.querySelector('.ac-head .ac-status').textContent;})()";
+      failReviewer = 'm3'; omitVerdictUsage = true;
+      await redoLast();
+      let partial = await js(lastStatus);
+      check('场景 F：一份互审失败，仲裁后显示部分完成 2/3', /部分完成 2\/3/.test(partial), partial);
+      check('场景 F：无 usage 的仲裁也结束转圈', await js("(function(){var cs=document.querySelectorAll('.review-card');return !cs[cs.length-1].querySelector('.rv-verdict .spinner');})()"));
+      await js('MM.chat.renderAll()'); partial = await js(lastStatus);
+      check('场景 F：历史重绘保留部分完成状态', /部分完成 2\/3/.test(partial), partial);
+
+      failReviewer = ''; failVerdict = true; omitVerdictUsage = false;
+      await redoLast();
+      let failed = await js(lastStatus);
+      check('场景 G：互审成功但仲裁失败，卡片显示失败', /失败/.test(failed), failed);
+      await js('MM.chat.renderAll()'); failed = await js(lastStatus);
+      check('场景 G：历史重绘不会把仲裁失败显示成完成', /失败/.test(failed), failed);
+      const verdictUsage = await js(`(function(){
+        var s=MM.sessions.current();var am=s.messages[s.messages.length-1];var rv=am.reviews[am.reviews.length-1];
+        var rows=MM.usage.testHooks.collect().rows;
+        return {status:rv.verdict.status,err:rv.verdict.error,hasFailedRow:rows.some(r=>r.kind==='review'&&r.status==='error')};
+      })()`);
+      check('场景 G：仲裁失败进入用量统计的失败行', verdictUsage.status === 'error' && verdictUsage.hasFailedRow, JSON.stringify(verdictUsage));
     }
 
     run().then(() => {

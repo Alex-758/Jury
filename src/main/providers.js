@@ -141,25 +141,62 @@ async function readError(res) {
   return friendlyHttpError(res.status, await readDetail(res));
 }
 
+function retryableStatus(status) {
+  return status === 429 || status === 502 || status === 503 || status === 504 || status === 529;
+}
+
+function retryDelay(res, attempt) {
+  const header = res && res.headers && res.headers.get('retry-after');
+  const seconds = header ? Number(header) : NaN;
+  const until = header ? Date.parse(header) : NaN;
+  const requested = Number.isFinite(seconds) ? seconds * 1000
+    : (Number.isFinite(until) ? until - Date.now() : 800 * Math.pow(2, attempt - 1));
+  // 不提前重试超过本轮等待上限的 Retry-After，交给用户稍后重试。
+  return requested > 10000 ? null : Math.max(250, requested);
+}
+
+function waitRetry(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal && signal.aborted) { reject(new Error('已停止')); return; }
+    const timer = setTimeout(done, ms);
+    function done() {
+      if (signal) signal.removeEventListener('abort', abort);
+      resolve();
+    }
+    function abort() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      reject(new Error('已停止'));
+    }
+    if (signal) signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 // 带上限地读完响应体：JSON Content-Type 路径用。异常端点忽略 stream:true
 // 返回超大 JSON 时，一次性 res.text() 会把主进程内存吃穿，这里读超即断
-async function readTextCapped(res, max) {
+async function readTextCapped(res, max, onData) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let out = '';
   let truncated = false;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    out += dec.decode(value, { stream: true });
-    if (out.length > max) {
-      truncated = true;
-      try { Promise.resolve(reader.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
-      break;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (onData) onData();
+      out += dec.decode(value, { stream: true });
+      if (out.length > max) {
+        truncated = true;
+        out = out.slice(0, max);
+        break;
+      }
     }
+    if (!truncated) out += dec.decode();
+    return { text: out, truncated: truncated };
+  } finally {
+    try { Promise.resolve(reader.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
+    reader.releaseLock();
   }
-  if (!truncated) out += dec.decode();
-  return { text: out, truncated: truncated };
 }
 
 // 把"完整 JSON 响应"归一成与流式一致的形状（兼容 OpenAI / Anthropic）。
@@ -224,8 +261,14 @@ function parseAnnotations(list) {
   const seen = new Set();
   for (const a of (Array.isArray(list) ? list : [])) {
     const c = (a && a.url_citation) || a || {};
-    const url = String(c.url || '');
-    if (!/^https?:\/\//i.test(url) || seen.has(url)) continue;
+    let url;
+    try {
+      const u = new URL(String(c.url || '').trim());
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+      u.hash = '';
+      url = u.pathname === '/' && !u.search ? u.origin : u.toString();
+    } catch (e) { continue; }
+    if (seen.has(url)) continue;
     seen.add(url);
     out.push({ url: url, title: String(c.title || url).slice(0, 200) });
     if (out.length >= 8) break;
@@ -287,15 +330,36 @@ async function streamChat(m, messages, opts) {
       if (signal && signal.aborted) return new Error('已停止');
       return new Error('网络请求失败：' + (e.cause && e.cause.message || e.message));
     };
-    try {
-      res = await doFetch(tryUsage);
-    } catch (e) {
-      throw netErr(e);
-    }
-    if (!res.ok && tryUsage && (res.status === 400 || res.status === 422)) {
-      // 丢弃被拒响应前必须先清空/取消响应体：未读的 body 会让 undici 连接滞留在池里
-      try { await res.text(); } catch (e) { try { Promise.resolve(res.body.cancel()).catch(function () {}); } catch (e2) { /* 已断 */ } }
-      try { res = await doFetch(false); } catch (e) { throw netErr(e); }
+    let withUsage = tryUsage;
+    let attempts = 0;
+    for (;;) {
+      try {
+        res = await doFetch(withUsage);
+      } catch (e) {
+        if (signal && signal.aborted) throw new Error('已停止');
+        const transientNetwork = !abortedByTimeout && !(e && e.name === 'AbortError');
+        if (transientNetwork && attempts < 2) {
+          attempts++;
+          await waitRetry(800 * Math.pow(2, attempts - 1), ctrl.signal);
+          continue;
+        }
+        throw netErr(e);
+      }
+      if (!res.ok && withUsage && (res.status === 400 || res.status === 422)) {
+        // 自托管端点不认 stream_options 时，去掉参数后重试；这是能力降级，不计入临时错误重试次数。
+        try { Promise.resolve(res.body && res.body.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
+        withUsage = false;
+        continue;
+      }
+      if (retryableStatus(res.status) && attempts < 2) {
+        const delay = retryDelay(res, attempts + 1);
+        if (delay == null) break;
+        try { Promise.resolve(res.body && res.body.cancel()).catch(function () {}); } catch (e) { /* 已断 */ }
+        attempts++;
+        await waitRetry(delay, ctrl.signal);
+        continue;
+      }
+      break;
     }
     bumpIdle();
     if (!res.ok) throw new Error(await readError(res));
@@ -378,7 +442,7 @@ async function streamChat(m, messages, opts) {
     // 响应体读取设与流式回退相同的 10MB 上限：异常端点返回超大 JSON 时不能无限吃内存
     const ctype = String(res.headers.get('content-type') || '').toLowerCase();
     if (ctype.indexOf('json') >= 0 && ctype.indexOf('event-stream') < 0) {
-      const body = await readTextCapped(res, 10 * 1024 * 1024);
+      const body = await readTextCapped(res, 10 * 1024 * 1024, bumpIdle);
       if (body.truncated) throw new Error('服务端响应超过 10MB，已中止解析');
       const text = body.text;
       let full = null;
@@ -455,7 +519,9 @@ async function streamChat(m, messages, opts) {
     if (!content && !reasoning) throw new Error('服务端未返回任何内容（可能被网关拦截或上游出错）');
     return { content, reasoning, usage, finish };
   } catch (e) {
-    if (abortedByTimeout) throw new Error('连接超时：服务器超过 120 秒没有返回数据，已中断');
+    if (abortedByTimeout) {
+      const err = new Error('连接超时：服务器超过 120 秒没有返回数据，已中断'); err.usage = usage; throw err;
+    }
     if ((signal && signal.aborted) || /abort/i.test(String(e && e.name))) {
       // 已停止也要把已产生的 token 用量带出去，界面才能对半截回答显示统计
       const err = new Error('已停止'); err.stopped = true; err.usage = usage; throw err;
@@ -553,7 +619,7 @@ async function chatOnce(m) {
 
 async function readDetail(res) {
   try {
-    const t = await res.text();
+    const t = (await readTextCapped(res, 64 * 1024)).text;
     try {
       const j = JSON.parse(t);
       return String((j.error && (j.error.message || j.error.msg)) || j.message || t).slice(0, 160);
