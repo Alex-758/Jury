@@ -51,7 +51,12 @@ function encryptValue(v) {
   if (v == null || v === '') return v;
   if (typeof v === 'object') return v; // 已是 { enc }
   try { return { enc: safeStorage.encryptString(String(v)).toString('base64') }; }
-  catch (e) { return v; } // 加密失败退回明文，保证功能可用
+  catch (e) {
+    // 加密失败不能静默回退明文：保存应失败并保留原有安全数据，交给上层提示用户。
+    const err = new Error('API 密钥加密失败，未写入明文密钥');
+    err.cause = e;
+    throw err;
+  }
 }
 function decryptValue(v) {
   if (v == null) return v;
@@ -150,6 +155,10 @@ function hardlinkOrCopy(src, destDir) {
 function backupAll(destDir) {
   try { fs.mkdirSync(destDir, { recursive: true }); } catch (e) { return; }
   const files = [configFile(), indexFile()];
+  try {
+    const imageDir = path.join(dataDir, 'images');
+    if (fs.existsSync(imageDir)) fs.cpSync(imageDir, path.join(destDir, 'images'), { recursive: true });
+  } catch (e) { /* 图片备份失败不阻断配置/会话备份 */ }
   try {
     for (const n of fs.readdirSync(sessionsDir())) {
       if (n.endsWith('.json') && n !== 'index.json') files.push(path.join(sessionsDir(), n));
@@ -436,7 +445,20 @@ function save(data) {
     written++;
   }
 
-  // 删除：内存基准里有、本次数据里没有的会话（导入替换/会话删除）
+  // index.json 先写成新的提交点，再清理不再登记的旧会话文件。
+  // 如果索引写入失败，旧索引仍指向旧文件，不能先删会话再留下不可见数据。
+  const order = Array.from(seenIds);
+  const idxStr = JSON.stringify({ v: 1, order: order });
+  if (idxStr !== idxCache) {
+    const f = indexFile();
+    try { fs.mkdirSync(sessionsDir(), { recursive: true }); } catch (e) { /* 已存在 */ }
+    conflictCheck(f);
+    writeAtomic(f, idxStr);
+    idxCache = idxStr;
+    written++;
+  }
+
+  // 删除：索引提交成功后，再清理内存基准里已不在新列表中的会话。
   for (const id of Array.from(sessionCache.keys())) {
     if (seenIds.has(id)) continue;
     const f = sessionFile(id);
@@ -447,18 +469,6 @@ function save(data) {
     if (name) usedNames.delete(name.toLowerCase());
     fileIds.delete(id);
     mtimes.delete(f);
-    written++;
-  }
-
-  // index.json：顺序单独维护（会话文件内容未变但顺序变了也要写）；去重后的插入序
-  const order = Array.from(seenIds);
-  const idxStr = JSON.stringify({ v: 1, order: order });
-  if (idxStr !== idxCache) {
-    const f = indexFile();
-    try { fs.mkdirSync(sessionsDir(), { recursive: true }); } catch (e) { /* 已存在 */ }
-    conflictCheck(f);
-    writeAtomic(f, idxStr);
-    idxCache = idxStr;
     written++;
   }
 

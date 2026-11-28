@@ -101,10 +101,11 @@
           scrollBottom(true);
         }
         searchPhase++;
-        curSearchId = nextReqId('sr');
+        const searchId = nextReqId('sr');
+        curSearchId = searchId;
         curSearchSessionId = s.id;
         try {
-          searchResults = await api.search(userMsg.content, 6, curSearchId);
+          searchResults = await api.search(userMsg.content, 6, searchId);
           if (!searchResults || !searchResults.length) U.toast('联网搜索未返回结果（可在设置中检查搜索引擎）');
         } catch (e) {
           // 被停止（chat:stop 经 activeRequests 中止）或已开新一轮：属预期，静默；
@@ -117,8 +118,11 @@
           }
         } finally {
           searchPhase--;
-          curSearchId = null;
-          curSearchSessionId = null;
+          // 旧搜索可能在新搜索已登记后才结束，只有仍指向本次 ID 才能清理全局句柄。
+          if (curSearchId === searchId) {
+            curSearchId = null;
+            curSearchSessionId = null;
+          }
         }
         if (searchResults && searchResults.length) userMsg.sources = searchResults;
       }
@@ -816,7 +820,7 @@
     const v = review.verdict;
     const p = reviewProgress(review);
     let cls = 'ok', text = '完成';
-    if (failed || (v && v.error) || (!v && !review.stopped)) { cls = 'err'; text = '失败'; }
+    if (failed || (v && (v.error || v.failed)) || (!v && !review.stopped)) { cls = 'err'; text = '失败'; }
     else if ((v && v.stopped) || (!v && review.stopped)) {
       cls = 'muted'; text = p.completed < p.total ? '部分完成 · 已停止' : '已停止';
     } else if (p.completed < p.total) { cls = 'warn'; text = '部分完成 ' + p.completed + '/' + p.total; }
@@ -982,7 +986,7 @@
         decorateMergeSources(vr.body, v, ctx.am.results, ctx.roundId);
       }
       ctx.rvRefs.headStatus.innerHTML = reviewStatusHtml(review, failed);
-      if (failed || review.stopped || (v && (v.stopped || v.error)) || reviewProgress(review).completed < reviewProgress(review).total) {
+      if (failed || review.stopped || (v && (v.stopped || v.error || v.failed)) || reviewProgress(review).completed < reviewProgress(review).total) {
         addReviewRetryBtn(card, ctx.roundId);
       }
     }
@@ -1137,7 +1141,7 @@
           v.content += '\n\n（已停止，内容不完整，可点「重新审查」重出完整版）';
           if (refs) refs.status.innerHTML = '<span class="badge muted">已停止</span>';
         } else {
-          ctx.verdictFailed = true; v.status = 'error'; v.error = ev.message || '仲裁失败';
+          ctx.verdictFailed = true; v.status = 'error'; v.failed = true; v.error = ev.message || '仲裁失败';
           v.content += '\n\n（仲裁失败：' + ev.message + '）';
           if (refs) refs.status.innerHTML = '<span class="badge err">失败</span>';
         }

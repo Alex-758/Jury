@@ -46,7 +46,7 @@ window.MM = window.MM || {};
       name: r.name || r.modelName || r.modelId || fallbackName || '未知模型',
       // 完成信号 = 有真实用量 或 已有正文（仲裁/无 usage 回传的端点也能归为完成，
       // 否则永远显示「进行中」并抬高成功率分母）；stopped/error 仍按字段优先
-      status: statusOf(r.status, !!u || !!r.content, !!r.stopped),
+      status: statusOf(r.status || (r.failed || r.error ? 'error' : ''), !!u || !!r.content, !!r.stopped),
       err: r.error ? String(r.error) : '',
       input: u ? (Number(u.input) || 0) : 0,
       output: u ? (Number(u.output) || 0) : 0,
@@ -83,6 +83,7 @@ window.MM = window.MM || {};
   function collect() {
     const rows = [];
     let pruned = 0;
+    const prunedEntries = [];
     const sessions = (MM.state && Array.isArray(MM.state.sessions)) ? MM.state.sessions : [];
     for (const s of sessions) {
       if (!s || !Array.isArray(s.messages)) continue;
@@ -117,10 +118,14 @@ window.MM = window.MM || {};
           // 仲裁同样按 status/usage 归类；旧记录无 status 时沿用正文与用量的回退判定。
           if (rv.verdict) pushRow(rows, rts, 'review', title, rv.verdict, '仲裁');
         }
-        if (m.prunedTokens) pruned += Number(m.prunedTokens) || 0; // 版本池裁剪折算：只进总量，无法按天/模型拆
+        if (m.prunedTokens) {
+          const amount = Number(m.prunedTokens) || 0;
+          pruned += amount;
+          prunedEntries.push({ ts: baseTs, amount: amount });
+        }
       }
     }
-    return { rows: rows, pruned: pruned };
+    return { rows: rows, pruned: pruned, prunedEntries: prunedEntries };
   }
 
   // ---------- 聚合 ----------
@@ -249,6 +254,7 @@ window.MM = window.MM || {};
       if (r.status === 'ok') { ok++; if (r.ms > 0) mss.push(r.ms); }
       else if (r.status === 'error') error++;
       else if (r.status === 'stopped') stopped++;
+      else if (r.status === 'skipped') { /* 未发出的模型不计入进行中/成功率 */ }
       else run++;
       const t = r.input + r.output;
       if (r.kind === 'merge') synth += t;
@@ -276,6 +282,9 @@ window.MM = window.MM || {};
     const all = collect();
     const start = rangeStart();
     const f = all.rows.filter(r => r.ts >= start);
+    const rangePruned = all.prunedEntries
+      .filter(x => !x.ts || x.ts >= start)
+      .reduce((sum, x) => sum + x.amount, 0);
     const series = seriesList(f);
     const skey = r => split === 'kind' ? r.kind : (r.modelId || 'name:' + r.name);
     // 「其他」聚合系列：第 6 名起的模型都归 __other__，否则该系列永远画不出来
@@ -296,9 +305,9 @@ window.MM = window.MM || {};
       for (const k in b.series) b.stackTotal += b.series[k];
     }
     return {
-      all: all.rows, pruned: all.pruned, f, series,
+      all: all.rows, pruned: rangePruned, f, series,
       buckets: bk.list, // 纯数据（含函数会让 executeJavaScript 的结构化克隆失败）
-      kpi: kpis(f, all.pruned),
+      kpi: kpis(f, rangePruned),
       heat: dailyTotals(all.rows)
     };
   }

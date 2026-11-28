@@ -137,8 +137,11 @@ app.whenReady().then(async () => {
     check('自动备份含 config.json（硬链接/复制）', fs.existsSync(path.join(t1, 'backups', dayKey, 'config.json')), '');
 
     // ---------- 6. 导入前整库快照 ----------
+    fs.mkdirSync(path.join(t1, 'images'), { recursive: true });
+    fs.writeFileSync(path.join(t1, 'images', 'aabbccddeeff.png'), 'image-backup-fixture');
     const snap = store.snapshot('pre-import');
     check('snapshot 返回非空目录且含 config.json', !!snap && fs.existsSync(path.join(snap, 'config.json')), String(snap));
+    check('snapshot 同时包含图片附件', !!snap && fs.existsSync(path.join(snap, 'images', 'aabbccddeeff.png')), 'images 不在快照中');
 
     // ---------- 7. 特殊字符 id 的文件名净化 ----------
     const t2 = mkTmp('sanitize');

@@ -322,11 +322,22 @@
       (cost != null ? ' · ≈' + MM.modelInfo.fmtCost(cost) : '') + '</span>';
   }
 
-  // 本轮合计用量（供轮次工具栏显示）；没有任何模型回传时返回 null，界面不显示
+  // 本轮合计用量（回答 + 模型综合 + 交叉审查）；没有任何服务端用量时返回 null
   function roundUsage(am) {
-    const list = (am.results || []).filter(r => r.usage && (num(r.usage.input) || num(r.usage.output)));
-    if (!list.length) return null;
-    return list.reduce((a, r) => a + num(r.usage.input) + num(r.usage.output), 0);
+    let total = 0;
+    let hasUsage = false;
+    const add = u => {
+      if (!u) return;
+      const n = num(u.input) + num(u.output);
+      if (n) { total += n; hasUsage = true; }
+    };
+    for (const r of (am.results || [])) add(r.usage);
+    if (am.merge && am.merge.mode !== 'frontend') add(am.merge.usage);
+    for (const rv of (am.reviews || [])) {
+      for (const it of (rv.items || [])) add(it.usage);
+      if (rv.verdict) add(rv.verdict.usage);
+    }
+    return hasUsage ? total : null;
   }
 
   function answersGrid(am) {
@@ -676,16 +687,23 @@
     // 本轮合计 token：放在最后，不打乱既有按钮顺序
     const total = roundUsage(am);
     if (total) {
-      const n = (am.results || []).filter(r => r.usage && (r.usage.input || r.usage.output)).length;
+      const usageRows = [];
+      for (const r of (am.results || [])) usageRows.push(r);
+      if (am.merge && am.merge.mode !== 'frontend') usageRows.push(am.merge);
+      for (const rv of (am.reviews || [])) {
+        for (const it of (rv.items || [])) usageRows.push(it);
+        if (rv.verdict) usageRows.push(rv.verdict);
+      }
+      const n = usageRows.filter(r => r.usage && (r.usage.input || r.usage.output)).length;
       // 本轮花费合计：按各模型单价分别解析；一个已知的都没有就不显示金额
       let cost = 0, costAny = false;
-      for (const r of (am.results || [])) {
+      for (const r of usageRows) {
         const c = MM.costOf ? MM.costOf(r.modelId, r.usage) : null;
         if (c != null) { costAny = true; cost += c; }
       }
       tools.appendChild(U.el('span', {
         class: 'round-tok',
-        title: '本轮 ' + n + ' 个模型的 token 用量合计（输入+输出）' +
+        title: '本轮 ' + n + ' 个请求的 token 用量合计（回答、综合与审查）' +
           (costAny ? '；花费 ≈' + MM.modelInfo.fmtCost(cost) + '（单价未知的模型不计入）' : '')
       }, 'Σ ' + MM.modelInfo.fmtTokens(total) + ' tok' + (costAny ? ' · ≈' + MM.modelInfo.fmtCost(cost) : '')));
     }
@@ -731,7 +749,7 @@
         '|' + (rvA.verdict
           // verdict.content 同理可为空（仲裁占位已建、正文未到就被中断）
           ? ((rvA.verdict.content || '').length + (rvA.verdict.usage ? 'u' : '') + (rvA.verdict.stopped ? 's' : '') +
-            (rvA.verdict.status || '') + (rvA.verdict.error || ''))
+            (rvA.verdict.status || '') + (rvA.verdict.error || '') + (rvA.verdict.failed ? 'f' : ''))
           : '-') + (rvA.stopped ? 'S' : '')
       : '';
     return 'A:' + u + '|' + am.active + ',' + ((am.versions || []).length) + '|' + rs + '|' + mg + '|' + rv +

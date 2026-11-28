@@ -54,7 +54,7 @@ const server = http.createServer((req, res) => {
     if ((kind === 'review' && model === failReviewer) || (kind === 'verdict' && failVerdict)) {
       res.writeHead(401, { 'Content-Type': 'application/json' }); res.end('{"error":{"message":"模拟失败"}}'); return;
     }
-    const usage = { prompt_tokens: 100 + cnt[kind === 'verdict' ? 'verdict' : kind] , completion_tokens: 50 };
+    const usage = kind === 'verdict' && process.env.JURY_REVIEW_NO_USAGE ? null : { prompt_tokens: 100 + cnt[kind === 'verdict' ? 'verdict' : kind] , completion_tokens: 50 };
     setTimeout(() => {
       try {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -297,6 +297,14 @@ server.listen(0, '127.0.0.1', () => {
         return {status:rv.verdict.status,err:rv.verdict.error,hasFailedRow:rows.some(r=>r.kind==='review'&&r.status==='error')};
       })()`);
       check('场景 G：仲裁失败进入用量统计的失败行', verdictUsage.status === 'error' && verdictUsage.hasFailedRow, JSON.stringify(verdictUsage));
+      const legacyVerdict = await js(`(function(){
+        var s=MM.sessions.current();var am=s.messages[s.messages.length-1];var rv=am.reviews[am.reviews.length-1];
+        delete rv.verdict.status;delete rv.verdict.error;rv.verdict.failed=true;rv.verdict.modelName='旧版失败仲裁';
+        MM.chat.renderAll();
+        return MM.usage.testHooks.collect().rows.find(r=>r.name==='旧版失败仲裁');
+      })()`);
+      check('场景 G：1.5.5 的 failed 仲裁记录仍显示失败', /失败/.test(await js(lastStatus)));
+      check('场景 G：旧版 failed 仲裁归入失败用量', legacyVerdict && legacyVerdict.status === 'error', JSON.stringify(legacyVerdict));
     }
 
     run().then(() => {

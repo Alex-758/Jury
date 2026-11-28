@@ -160,6 +160,7 @@ async function webSearch(cfg, query, count = 6, opts) {
   const key = (cfg && cfg.apiKey || '').trim();
   if (opts && opts.signal && opts.signal.aborted) throw new Error('已停止');
   if (!provider || provider === 'none') return null;
+  if (!['bing', 'tavily', 'bocha'].includes(provider)) throw new Error('不支持的搜索服务商：' + provider);
   count = Math.max(1, Math.min(Math.floor(Number(count) || 6), 12));
   const q = normalizeQuery(query);
   if (!q) return [];
